@@ -41,9 +41,12 @@ const HAND_CHAIN = { Thumb: [1, 2, 3, 4], Index: [5, 6, 7, 8], Middle: [9, 10, 1
 const HEAD_PITCH_LIMIT = THREE.MathUtils.degToRad(30);
 
 /* The same is true of the camera itself: one tilted up or down makes a
- * standing person lean. Over a take, the middle of the chest's "up" is taken
- * as upright - unless it is so far from upright (someone lying down for most
- * of the clip) that it cannot be the camera. */
+ * standing person lean. The best evidence of "up" is someone standing on
+ * straight legs - the line from between the ankles to between the hips is
+ * then vertical, whatever the chest is doing - so those frames are used when
+ * there are enough of them. Otherwise the chest's "up", when the hips were
+ * really seen. Either way the middle of them is taken as upright, unless it is
+ * so far from upright that it cannot be the camera. */
 const LEVEL_LIMIT = THREE.MathUtils.degToRad(35);
 
 /* Whether MediaPipe's "Left" face shapes are the person's left. Kept as one
@@ -195,18 +198,36 @@ const pt = (arr, i) => new THREE.Vector3(arr[i * 3], -arr[i * 3 + 1], -arr[i * 3
 const mid = (a, b) => a.clone().add(b).multiplyScalar(0.5);
 const restDir = (child) => OFFSET[child].clone().normalize();
 
+/* Whether a point was really seen. MediaPipe reports every point, including
+ * ones outside the picture, which it is guessing. A point inside the picture
+ * is used even when its confidence is modest - a knee half-hidden behind the
+ * other leg is still a far better guess than no knee - but one outside the
+ * picture is not. Deciding with a high confidence bar instead made one leg
+ * stand straight while the other bent, which is worse than either. */
+export function isSeen(vis, img, i, min = 0.2) {
+  if (vis && !(vis[i] > min)) return false;
+  if (!img) return true;
+  const x = img[i * 2], y = img[i * 2 + 1];
+  return x > -0.02 && x < 1.02 && y > -0.02 && y < 1.02;
+}
+
+export function legSeen(vis, img, left) {
+  return left ? isSeen(vis, img, P.lKnee) && isSeen(vis, img, P.lAnk)
+    : isSeen(vis, img, P.rKnee) && isSeen(vis, img, P.rAnk);
+}
+
 /** Everything about one frame's pose, as world rotations of the bones.
  *  `level` turns the camera upright; `headPitch` is the head's neutral tilt. */
-export function aimFrame(w, vis, handL, handR, { level = null, headPitch = 0 } = {}) {
+export function aimFrame(w, vis, handL, handR, { level = null, headPitch = 0, img = null } = {}) {
   const W = {};                                        // world rotations
   const get = (i) => (level ? pt(w, i).applyQuaternion(level) : pt(w, i));
   const hpt = (arr, i) => (level ? pt(arr, i).applyQuaternion(level) : pt(arr, i));
-  const seen = (i) => !vis || vis[i] > 0.5;
+  const seen = (i, min) => isSeen(vis, img, i, min);
 
   // Hips and chest: the line across, and the line up.
   const shoulders = get(P.lSh).sub(get(P.rSh));
   let chest;
-  if (seen(P.lHip) && seen(P.rHip)) {
+  if (seen(P.lHip, 0.5) && seen(P.rHip, 0.5)) {
     const up = mid(get(P.lSh), get(P.rSh)).sub(mid(get(P.lHip), get(P.rHip)));
     W.Hips = align(X, Y, get(P.lHip).sub(get(P.rHip)), up);
     chest = align(X, Y, shoulders, up);
@@ -293,7 +314,7 @@ export function aimFrame(w, vis, handL, handR, { level = null, headPitch = 0 } =
 
     // Leg, the same way as the arm: in the T-pose the knee folds backward.
     const hip = get(l ? P.lHip : P.rHip), kn = get(l ? P.lKnee : P.rKnee), an = get(l ? P.lAnk : P.rAnk);
-    const legsSeen = seen(l ? P.lKnee : P.rKnee) && seen(l ? P.lAnk : P.rAnk);
+    const legsSeen = legSeen(vis, img, l);
     if (legsSeen) {
       const thigh = kn.clone().sub(hip), shin = an.clone().sub(kn);
       const down = Y.clone().negate();
@@ -303,7 +324,7 @@ export function aimFrame(w, vis, handL, handR, { level = null, headPitch = 0 } =
       W[s + 'UpLeg'] = align(down, kneeBend0, thigh, kneeBend);
       W[s + 'Leg'] = swing(W[s + 'UpLeg'], restDir(s + 'Foot'), shin);
       const heel = get(l ? P.lHeel : P.rHeel), toe = get(l ? P.lToe : P.rToe);
-      W[s + 'Foot'] = seen(l ? P.lToe : P.rToe)
+      W[s + 'Foot'] = seen(l ? P.lToe : P.rToe, 0.3)
         ? align(Z, Y, toe.clone().sub(heel), an.clone().sub(heel))
         : W[s + 'Leg'].clone();
     } else {
@@ -374,25 +395,41 @@ function median(xs) {
 /** How far the chest is tilted from upright, and how far the nose is above
  *  the ears, in every frame - the raw material for the two calibrations. */
 function calibrate(S) {
-  const ups = [], pitches = [];
+  const ups = [], standing = [], pitches = [];
+  const bend = (hip, knee, ankle) => knee.clone().sub(hip).angleTo(ankle.clone().sub(knee));
   S.world.forEach((w, i) => {
     if (!w) return;
     const v = S.vis[i], im = S.img[i];
-    const inside = (k) => !im || im[k * 2 + 1] < 1.0;
-    const hipsSeen = (!v || (v[P.lHip] > 0.5 && v[P.rHip] > 0.5)) && inside(P.lHip) && inside(P.rHip);
+    const hipsSeen = isSeen(v, im, P.lHip, 0.5) && isSeen(v, im, P.rHip, 0.5);
+    const hipMid = mid(pt(w, P.lHip), pt(w, P.rHip));
     const up = hipsSeen
-      ? mid(pt(w, P.lSh), pt(w, P.rSh)).sub(mid(pt(w, P.lHip), pt(w, P.rHip))).normalize()
+      ? mid(pt(w, P.lSh), pt(w, P.rSh)).sub(hipMid).normalize()
       : Y.clone();
-    // Only a torso that was really seen says anything about the camera.
+    // Only a body that was really seen says anything about the camera.
     if (hipsSeen) ups.push(up);
+    if (hipsSeen && legSeen(v, im, true) && legSeen(v, im, false)) {
+      standing.push({
+        up: hipMid.clone().sub(mid(pt(w, P.lAnk), pt(w, P.rAnk))).normalize(),
+        bend: Math.max(bend(pt(w, P.lHip), pt(w, P.lKnee), pt(w, P.lAnk)),
+          bend(pt(w, P.rHip), pt(w, P.rKnee), pt(w, P.rAnk))),
+      });
+    }
     const fwd = pt(w, P.nose).sub(mid(pt(w, P.lEar), pt(w, P.rEar))).normalize();
     pitches.push(Math.asin(THREE.MathUtils.clamp(-fwd.dot(up), -1, 1)));
   });
   let level = null;
   // A handful of frames is noise, not a camera.
-  if (ups.length >= Math.max(10, 0.25 * S.n)) {
-    const m = new THREE.Vector3(median(ups.map((u) => u.x)), median(ups.map((u) => u.y)),
-      median(ups.map((u) => u.z))).normalize();
+  const enough = (list) => list.length >= Math.max(10, 0.15 * S.n);
+  // The straightest third of the frames with legs in them, and only if those
+  // are fairly straight: the tracker reads a standing knee as 25-35 degrees
+  // bent, so "straight" has to be relative to the take.
+  standing.sort((a, b) => a.bend - b.bend);
+  const legUps = standing.slice(0, Math.ceil(standing.length / 3))
+    .filter((f) => f.bend < THREE.MathUtils.degToRad(40)).map((f) => f.up);
+  const evidence = enough(legUps) ? legUps : enough(ups) ? ups : null;
+  if (evidence) {
+    const m = new THREE.Vector3(median(evidence.map((u) => u.x)), median(evidence.map((u) => u.y)),
+      median(evidence.map((u) => u.z))).normalize();
     if (m.angleTo(Y) < LEVEL_LIMIT) level = new THREE.Quaternion().setFromUnitVectors(m, Y);
   }
   const headPitch = THREE.MathUtils.clamp(median(pitches) || 0, -HEAD_PITCH_LIMIT, HEAD_PITCH_LIMIT);
@@ -420,7 +457,7 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'video', han
     if (!im) continue;
     const px = (k) => new THREE.Vector2(im[k * 2] * W, im[k * 2 + 1] * H);
     hipPx[i] = px(P.lHip).add(px(P.rHip)).multiplyScalar(0.5);
-    legsSeen[i] = v && [P.lKnee, P.rKnee, P.lAnk, P.rAnk].every((k) => v[k] > 0.5);
+    legsSeen[i] = legSeen(v, im, true) && legSeen(v, im, false);
     if (legsSeen[i]) {
       pixelLegs.push((px(P.lHip).distanceTo(px(P.lAnk)) + px(P.rHip).distanceTo(px(P.rAnk))) / 2);
       footPx[i] = Math.max(...[P.lHeel, P.rHeel, P.lToe, P.rToe].map((k) => im[k * 2 + 1] * H));
@@ -439,7 +476,7 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'video', han
     if (hl || hr) handsFound++;
     if (S.face[i]) faceFound++;
 
-    const q = w ? toLocal(aimFrame(w, S.vis[i], hl, hr, cal)) : (frames.length ? frames[frames.length - 1].q : toLocal({}));
+    const q = w ? toLocal(aimFrame(w, S.vis[i], hl, hr, { ...cal, img: S.img[i] })) : (frames.length ? frames[frames.length - 1].q : toLocal({}));
 
     // On the floor: the lower foot touches it.
     const restHips = OFFSET.Hips.y;
@@ -511,7 +548,7 @@ export class LiveSolver {
     const face = this.smooth('f', frame.face, t);
     this.last = t;
     if (!w) return null;
-    return { q: toLocal(aimFrame(w, frame.pose.v, hl, hr)), m: faceWeights(face, faceNames) };
+    return { q: toLocal(aimFrame(w, frame.pose.v, hl, hr, { img: frame.pose.i })), m: faceWeights(face, faceNames) };
   }
 }
 

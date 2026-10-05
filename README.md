@@ -47,6 +47,8 @@ has them all.
   showing, cermin keeps the torso upright and the legs standing still.
 - A camera that does not move. cermin follows the person across the picture,
   so a moving camera reads as the person moving.
+- Film from the front or the side. From behind, a single camera cannot tell
+  how far forward a knee or an elbow is, and the mannequin shows that.
 - One person, plain light, clothes that do not hide the joints.
 - Hands and face need to be big enough to see: a full-body shot finds the body
   well and the fingers poorly. Film a second, closer take for hands and face.
@@ -55,7 +57,7 @@ has them all.
 
 ```bash
 npm install          # once: playwright-core, for driving Chrome
-npm test             # upload, solve, export, reopen, record, close-up
+npm test             # 35 checks: upload, solve, export, reopen, record, close-up
 node tests/smoke.mjs --fbx   # also make the .fbx through Blender MCP
 ```
 

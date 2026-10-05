@@ -18,7 +18,7 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { api, say, working } from '/common/tool.js';
 import { buildMannequin } from './mannequin.js';
 import { trackers, trackVideo, detect, drawOverlay } from './track.js';
-import { solve, LiveSolver, lowestFoot, BONE_NAMES } from './solve.js';
+import { solve, LiveSolver, lowestFoot, legSeen, BONE_NAMES } from './solve.js';
 import { buildClip, toGLB, toBVH, toFaceCSV } from './export.js';
 
 const TOKEN = window.BENGKEL_TOKEN;
@@ -449,14 +449,14 @@ function liveStep() {
   const pose = rec.solver.step(frame, now / 1000, state.live.faceNames || []);
   if (pose) {
     applyPose(pose.q, $('opt-face').checked ? pose.m : null, [0, 0, 0]);
-    const v = frame.pose.v;
-    const legs = [25, 26, 27, 28].every((k) => v[k] > 0.5);
+    const legs = legSeen(frame.pose.v, frame.pose.i, true) && legSeen(frame.pose.v, frame.pose.i, false);
     man.bones.Hips.position.set(0, legs ? -lowestFoot(man, pose.q) : 0.95, 0);
     liveSeen = now;
   }
   if (!rec.recorder) {
     $('rec-say').textContent = !pose ? 'No one found yet — step into the picture'
-      : [25, 26, 27, 28].every((k) => frame.pose.v[k] > 0.5) ? 'Found you, head to feet. Ready when you are.'
+      : legSeen(frame.pose.v, frame.pose.i, true) && legSeen(frame.pose.v, frame.pose.i, false)
+        ? 'Found you, head to feet. Ready when you are.'
         : 'Found you — step back to get your legs in too';
   } else if (now - liveSeen > 1000) {
     $('rec-say').textContent = 'Lost you — come back into the picture';

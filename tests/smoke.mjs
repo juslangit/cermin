@@ -236,6 +236,34 @@ check(rs.s.person > 0.8, `and the person is found in ${(rs.s.person * 100).toFix
 const files = fs.readdirSync(path.join(DATA, 'takes', rs.take));
 check(files.some((f) => /^video\.(mp4|webm)$/.test(f)) && files.includes('capture.json'),
   `the recording is kept beside its capture (${files.join(', ')})`);
+// A squat bends both knees together. Seen from behind the tracker's depth is
+// at its weakest, so this is measured loosely - but a leg standing straight
+// while the other bends is the failure this guards against.
+const knees = await page.evaluate(() => {
+  const { state, man } = window.cermin;
+  const names = Object.keys(man.bones);
+  const v = (n) => man.bones[n].getWorldPosition(new man.root.position.constructor());
+  const bend = (s) => {
+    const a = v(s + 'UpLeg'), b = v(s + 'Leg'), c = v(s + 'Foot');
+    return Math.PI - a.sub(b).angleTo(c.sub(b));
+  };
+  const diffs = [];
+  let deep = 0;
+  for (const f of state.solved.frames) {
+    names.forEach((n, b) => man.bones[n].quaternion.fromArray(f.q, b * 4));
+    man.root.updateMatrixWorld(true);
+    const l = bend('Left'), r = bend('Right');
+    diffs.push(Math.abs(l - r));
+    if (l > 0.6 && r > 0.6) deep++;
+  }
+  man.reset();
+  diffs.sort((a, b) => a - b);
+  return { median: diffs[Math.floor(diffs.length / 2)] * 180 / Math.PI, deep, n: diffs.length };
+});
+console.log(`       knees differ by ${knees.median.toFixed(0)}° (median) — filmed from behind, where the tracker's depth is weakest`);
+check(knees.deep > 10, `both knees bend past 35° in ${knees.deep} of ${knees.n} frames — the squat`);
+await page.evaluate(() => { const v = document.getElementById('video'); v.pause(); v.currentTime = 0.4; });
+await page.waitForTimeout(700);
 await page.screenshot({ path: path.join(OUT, '7-recorded.png') });
 
 // ── 5. close up: hands, fingers and face ───────────────────────────────────
