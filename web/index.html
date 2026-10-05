@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cermin</title>
+<link rel="stylesheet" href="/common/shell.css">
+<link rel="stylesheet" href="/web/cermin.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/web/vendor/three.module.js",
+    "three/addons/": "/web/vendor/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="mark"></span><span class="wordmark">cermin</span></div>
+  <div class="subject" id="subject">Motion capture from a video, or from your camera</div>
+  <div class="topbar-actions">
+    <button class="btn btn-small" id="upload">Upload a video</button>
+    <button class="btn btn-small btn-primary" id="record">Record</button>
+    <input type="file" id="file" accept="video/*" hidden>
+  </div>
+</header>
+
+<main class="bench">
+
+  <aside class="panel panel-left">
+    <div class="panel-title">Takes</div>
+    <div class="list" id="takes">
+      <p class="hint">Every capture is kept here, with its video, so it can be
+      re-solved or exported again without tracking it twice.</p>
+    </div>
+  </aside>
+
+  <section class="stages">
+    <div class="pane" id="video-pane">
+      <div class="pane-label">Video</div>
+      <div class="frame" id="frame">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="pane-empty" id="video-empty">
+        <h1>Show cermin someone moving</h1>
+        <p><b>Upload a video</b> of a person — or press <b>Record</b> and do the
+        move yourself in front of the camera.</p>
+        <p class="quiet">Best results: the whole body in the picture, a camera
+        that stays still, plain light, one person.</p>
+      </div>
+      <div class="rec-bar" id="rec-bar" hidden>
+        <span class="rec-dot"></span><span id="rec-time">0:00</span>
+        <span class="rec-say" id="rec-say">Get into the picture — your whole body if you can</span>
+        <button class="btn btn-small" id="rec-cancel">Cancel</button>
+        <button class="btn btn-small btn-primary" id="rec-go">Start recording</button>
+      </div>
+      <div class="countdown" id="countdown" hidden></div>
+    </div>
+
+    <div class="pane" id="stage-pane">
+      <div class="pane-label">Mannequin</div>
+      <div class="viewport" id="viewport"></div>
+      <div class="viewport-tools">
+        <div class="seg" id="view">
+          <button class="seg-btn is-on" data-view="front">Front</button>
+          <button class="seg-btn" data-view="side">Side</button>
+          <button class="seg-btn" data-view="three">¾</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="transport" id="transport">
+      <button class="icon-btn" id="play" title="Play / pause (space)">▶</button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" disabled>
+      <span class="time" id="time">0:00.0 / 0:00.0</span>
+      <div class="seg" id="speed">
+        <button class="seg-btn" data-speed="0.25">¼×</button>
+        <button class="seg-btn" data-speed="0.5">½×</button>
+        <button class="seg-btn is-on" data-speed="1">1×</button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel panel-right">
+    <div class="panel-title">Capture</div>
+    <div class="group">
+      <label class="check"><input type="checkbox" checked disabled> Body</label>
+      <label class="check"><input type="checkbox" id="opt-hands" checked> Hands and fingers</label>
+      <label class="check"><input type="checkbox" id="opt-face" checked> Face</label>
+      <div class="field">
+        <span>Tracking</span>
+        <div class="seg" id="opt-quality">
+          <button class="seg-btn is-on" data-v="accurate">Accurate</button>
+          <button class="seg-btn" data-v="fast">Fast</button>
+        </div>
+      </div>
+      <div class="field">
+        <span>Frames per second</span>
+        <div class="seg" id="opt-fps">
+          <button class="seg-btn" data-v="24">24</button>
+          <button class="seg-btn is-on" data-v="30">30</button>
+          <button class="seg-btn" data-v="60">60</button>
+        </div>
+      </div>
+      <p class="hint">These are used the next time a video is tracked.</p>
+    </div>
+
+    <div class="panel-title">Clean-up</div>
+    <div class="group">
+      <div class="field">
+        <span>Smoothing <b id="smooth-val">50</b></span>
+        <input type="range" id="opt-smooth" min="0" max="100" value="50">
+      </div>
+      <div class="field">
+        <span>Moving around</span>
+        <div class="seg" id="opt-root">
+          <button class="seg-btn is-on" data-v="video">Follow the video</button>
+          <button class="seg-btn" data-v="place">Stay in place</button>
+        </div>
+      </div>
+      <p class="hint">Changes here re-solve the take straight away — the video
+      is not tracked again.</p>
+    </div>
+
+    <div class="panel-title">Found</div>
+    <dl class="facts" id="facts"><dt>Nothing yet</dt><dd></dd></dl>
+
+    <div class="panel-title">Export</div>
+    <div class="group export">
+      <button class="btn btn-wide" data-export="glb" disabled>.glb <small>mannequin + animation</small></button>
+      <button class="btn btn-wide" data-export="fbx" disabled>.fbx <small>through Blender</small></button>
+      <button class="btn btn-wide" data-export="bvh" disabled>.bvh <small>skeleton only</small></button>
+      <button class="btn btn-wide" data-export="csv" disabled>.csv <small>51 face values</small></button>
+      <button class="btn btn-wide btn-quiet" id="reveal" disabled>Show the take in Finder</button>
+    </div>
+  </aside>
+</main>
+
+<div class="drop" id="drop" hidden><p>Let go to capture this video</p></div>
+<div class="toast" id="toast" hidden></div>
+<div class="working" id="working" hidden>
+  <div class="working-inner">
+    <div class="spinner"></div>
+    <p class="what"></p>
+    <p class="why"></p>
+    <div class="bar"><i id="bar"></i></div>
+    <button class="btn btn-small" id="cancel">Stop</button>
+  </div>
+</div>
+
+<script>window.BENGKEL_TOKEN = "__BENGKEL_TOKEN__";</script>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

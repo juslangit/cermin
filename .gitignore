@@ -1,0 +1,9 @@
+.env
+__pycache__/
+.DS_Store
+node_modules/
+tests/out/
+scratch/
+docs/index.html
+tests/media/jumping.webm
+tests/media/signs.webm

@@ -1,0 +1,148 @@
+/* cermin — a mirror.
+ *
+ * Teal, the colour of glass seen edge-on, and one none of the bengkel tools
+ * has taken.
+ */
+
+:root { --tool: #3fd0c9; --rec: #ef4b4b; }
+
+.bench {
+  position: absolute;
+  inset: var(--topbar-h) 0 0 0;
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr) 300px;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* ── the two panes, side by side, and the transport under them ─────── */
+
+.stages {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-sunken);
+}
+.pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+#video-pane { border-right: 1px solid var(--line); background: #0d0e11; }
+.pane-label {
+  position: absolute; top: 12px; right: 14px; z-index: 3;
+  pointer-events: none;
+  font: 500 0.8rem ui-monospace, "SF Mono", monospace;
+  color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+
+.frame { position: absolute; inset: 0; display: grid; place-items: center; }
+.frame video, .frame canvas {
+  grid-area: 1 / 1;
+  max-width: 100%; max-height: 100%;
+  width: auto; height: auto;
+  display: block;
+}
+.frame canvas { pointer-events: none; }
+/* Live, the camera is shown as a mirror, which is how anyone expects to see
+ * themselves. The take itself is never flipped. */
+.is-live .frame video, .is-live .frame canvas, .is-live #viewport canvas { transform: scaleX(-1); }
+
+.pane-empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  text-align: center; padding: 34px; gap: 4px;
+}
+.pane-empty h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 8px; color: var(--ink-dim); }
+.pane-empty p { margin: 4px 0; max-width: 38ch; color: var(--ink-faint); line-height: 1.6; }
+.pane-empty b { color: var(--ink-dim); }
+.quiet { color: var(--ink-faint); font-size: 0.88rem; }
+
+/* ── recording ─────────────────────────────────────────────────────── */
+
+.rec-bar {
+  position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 4;
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(22,24,29,0.9);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 9px 10px 9px 14px;
+  backdrop-filter: blur(8px);
+}
+.rec-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--ink-faint); flex: none; }
+.is-recording .rec-dot { background: var(--rec); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+#rec-time { font: 600 0.95rem ui-monospace, "SF Mono", monospace; min-width: 44px; }
+.rec-say { flex: 1; color: var(--ink-dim); font-size: 0.9rem; min-width: 0; }
+.is-recording #rec-go { background: var(--rec); border-color: var(--rec); color: #fff; }
+
+.countdown {
+  position: absolute; inset: 0; z-index: 5;
+  display: grid; place-items: center;
+  font: 700 7rem ui-sans-serif, -apple-system, system-ui;
+  color: #fff; text-shadow: 0 4px 30px rgba(0,0,0,0.6);
+  pointer-events: none;
+}
+
+/* ── transport ─────────────────────────────────────────────────────── */
+
+.transport {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.transport .icon-btn { height: 38px; }
+.transport input[type="range"] { flex: 1; accent-color: var(--tool); }
+.time { font: 500 0.88rem ui-monospace, "SF Mono", monospace; color: var(--ink-dim); white-space: nowrap; }
+
+/* ── side panels ───────────────────────────────────────────────────── */
+
+.panel-right { padding-bottom: 20px; }
+.group { padding: 0 18px 8px; display: flex; flex-direction: column; gap: 10px; }
+.field { display: flex; flex-direction: column; gap: 7px; font-size: 0.9rem; color: var(--ink-dim); }
+.field b { color: var(--ink); font-weight: 600; }
+.field input[type="range"] { accent-color: var(--tool); width: 100%; }
+.field .seg { align-self: flex-start; }
+.hint { color: var(--ink-faint); font-size: 0.82rem; line-height: 1.5; margin: 2px 0 6px; }
+
+.facts {
+  margin: 0 18px 8px;
+  display: grid; grid-template-columns: auto 1fr; gap: 5px 14px;
+  font-size: 0.86rem;
+}
+.facts dt { color: var(--ink-faint); }
+.facts dd { margin: 0; text-align: right; font: 500 0.84rem ui-monospace, "SF Mono", monospace; }
+.facts .low { color: var(--warn); }
+
+.export .btn { justify-content: space-between; }
+.export small { color: var(--ink-faint); font-size: 0.78rem; font-weight: 500; }
+.btn-quiet { background: none; justify-content: center !important; color: var(--ink-dim); }
+
+.take { cursor: pointer; }
+.take-name { font-weight: 600; font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.take-meta { color: var(--ink-faint); font-size: 0.8rem; margin-top: 3px; }
+.take-del {
+  float: right; border: none; background: none; color: var(--ink-faint);
+  cursor: pointer; font-size: 1rem; padding: 0 2px; visibility: hidden;
+}
+.take:hover .take-del { visibility: visible; }
+.take-del:hover { color: var(--warn); }
+
+/* ── working ───────────────────────────────────────────────────────── */
+
+.working-inner { min-width: 360px; }
+.working .bar {
+  margin: 16px auto 4px; height: 6px; width: 300px;
+  background: var(--bg-sunken); border-radius: 3px; overflow: hidden;
+}
+.working .bar i { display: block; height: 100%; width: 0; background: var(--tool); transition: width .15s; }
+.working #cancel { margin-top: 14px; }
+
+.drop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(22,24,29,.86);
+  border: 3px dashed var(--tool);
+  font-size: 1.15rem;
+}
