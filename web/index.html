@@ -63,7 +63,8 @@
       <div class="character-picker">
         <label for="character">Character</label>
         <select id="character">
-          <option value="mannequin">Mannequin</option>
+          <option value="standard">Standard mannequin</option>
+          <option value="mannequin">Wooden mannequin</option>
           <option value="skeleton">Skeleton</option>
           <option value="male">Male character</option>
           <option value="female">Female character</option>
@@ -84,8 +85,14 @@
 
     <div class="transport" id="transport">
       <button class="icon-btn" id="play" title="Play / pause (space)">▶</button>
-      <input type="range" id="scrub" min="0" max="1000" value="0" disabled>
+      <div class="scrub-wrap"><div class="trim-band" id="trim-band" hidden></div>
+      <input type="range" id="scrub" min="0" max="1000" value="0" disabled></div>
       <span class="time" id="time">0:00.0 / 0:00.0</span>
+      <div class="trim" id="trim">
+        <button class="btn btn-small" id="trim-in" title="The take starts here (I)" disabled>Start here</button>
+        <button class="btn btn-small" id="trim-out" title="The take ends here (O)" disabled>End here</button>
+        <button class="btn btn-small btn-quiet" id="trim-clear" title="Use the whole video" hidden>Whole video</button>
+      </div>
       <div class="seg" id="speed">
         <button class="seg-btn" data-speed="0.25">¼×</button>
         <button class="seg-btn" data-speed="0.5">½×</button>
@@ -138,6 +145,7 @@
       <p class="hint">The feet always stay on the floor, and the body only leaves
       it for a real jump. The floor is scanned while tracking, so a camera that
       moves or turns does not lift or carry the mannequin.</p>
+      <label class="check"><input type="checkbox" id="opt-lock" checked> Keep planted feet still</label>
       <p class="hint">Changes here re-solve the take straight away — the video
       is not tracked again.</p>
     </div>

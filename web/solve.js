@@ -23,7 +23,8 @@
 
 import * as THREE from 'three';
 import { BONES, FINGERS, FACE_SHAPES, restPositions } from './mannequin.js';
-import { findJumps, travelAcross, scaleAtPerson } from './ground.js';
+import { findJumps, travelAcross, travelDepth, scaleAtPerson } from './ground.js';
+import { lockFeet } from './footlock.js';
 import { fuse } from './fuse.js';
 
 export const P = {
@@ -462,6 +463,34 @@ function calibrate(S) {
   return { level, headPitch };
 }
 
+/* How big the person is in the picture, steadily enough to read distance
+ * from: pixels per (MediaPipe) metre, frame by frame.
+ *
+ * A bone's length in the picture changes when it turns toward the camera,
+ * not only when the person comes closer - which made an earlier version,
+ * using the torso and legs, read a man standing still as wandering 40 cm.
+ * So each bone's picture length is set against its length ACROSS the view in
+ * 3D (its depth part left out), which turns with it; the middle value over
+ * a dozen bones is the size. */
+const SIZE_BONES = [[11, 12], [23, 24], [11, 23], [12, 24], [11, 13], [13, 15], [12, 14],
+  [14, 16], [23, 25], [25, 27], [24, 26], [26, 28]];
+function sizeInPicture(S, W, H) {
+  return S.world.map((w, n) => {
+    const im = S.img[n];
+    if (!w || !im) return NaN;
+    const ratios = [];
+    for (const [a, b] of SIZE_BONES) {
+      const across = Math.hypot(w[a * 3] - w[b * 3], w[a * 3 + 1] - w[b * 3 + 1]);
+      if (across < 0.12) continue;                  // nearly end-on: too little to measure
+      const px = Math.hypot((im[a * 2] - im[b * 2]) * W, (im[a * 2 + 1] - im[b * 2 + 1]) * H);
+      ratios.push(px / across);
+    }
+    if (ratios.length < 4) return NaN;
+    ratios.sort((p, q) => p - q);
+    return ratios[Math.floor(ratios.length / 2)];
+  });
+}
+
 // The mannequin's own measurements, to turn the person's size in the
 // picture into metres: hips to shoulders, and hip to ankle.
 const REST = restPositions();
@@ -473,7 +502,7 @@ const LEG_M = REST.LeftUpLeg.distanceTo(REST.LeftFoot);
  * The whole take, solved. `root` is 'follow' (move across the floor as the
  * person did) or 'place' (stay on the spot; jumps are kept either way).
  */
-export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', hands = true, face = true } = {}) {
+export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', hands = true, face = true, lockFeet: lockFeetOn = true } = {}) {
   const S = prepare(capture, { smoothing });
   const cal = calibrate(S);
   const W = S.width, H = S.height;
@@ -526,8 +555,15 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', ha
   const pxPerM = scaleAtPerson(torsoPx, legPx, TORSO_M, LEG_M, S.fps);
   const ground = findJumps(footPx, pxPerM, floorDy, S.fps, hipPx, upright);
 
-  // Pass 3: the hips over the floor.
+  // Pass 3: the hips over the floor - across the picture, and toward or away
+  // from the camera.
   const across = root === 'follow' ? travelAcross(hipX, pxPerM, floorDx, W) : null;
+  const zoom = capture.frames.map((f) => (f.floor && Number.isFinite(f.floor.zoom) ? f.floor.zoom : NaN));
+  // Depth needs the floor scan, to tell the person coming closer from the
+  // camera moving in; a take tracked before it has none, and stays at depth 0.
+  const scannedZoom = capture.frames.some((f) => f.floor && 'zoom' in f.floor);
+  const depth = root === 'follow' && scannedZoom
+    ? travelDepth(sizeInPicture(S, W, H), zoom, upright, Math.max(W, H), S.fps) : null;
   const restHips = OFFSET.Hips.y;
   let takeoff = restHips;
   frames.forEach((f, i) => {
@@ -537,7 +573,7 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', ha
     const grounded = legsSeen[i] ? -lows[i] : restHips;
     if (ground.air[i] && !(i > 0 && ground.air[i - 1])) takeoff = i > 0 && legsSeen[i - 1] ? -lows[i - 1] : grounded;
     const y = ground.air[i] ? Math.max(grounded, takeoff + ground.lift[i]) : grounded;
-    f.hips = [across ? across[i] : 0, y, 0];
+    f.hips = [across ? across[i] : 0, y, depth ? depth[i] : 0];
     f.air = ground.air[i];
     f.lift = ground.lift[i];
     // Drawn over the video: under the feet while they are on it, and where it
@@ -545,6 +581,9 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', ha
     const under = ground.air[i] ? ground.floorPx[i] : footPx[i];
     f.floor = Number.isFinite(under) ? under / H : null;
   });
+
+  // Pass 4: feet that were standing stay where they stood.
+  const pinned = lockFeetOn ? lockFeet(mannequin, frames, { air: ground.air, legsSeen }) : 0;
 
   const scanned = capture.frames.filter((f) => f.floor).length;
   const moving = capture.frames.filter((f) => f.floor && Math.hypot(f.floor.dx, f.floor.dy) > 0.002).length;
@@ -567,6 +606,8 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', ha
       face: S.n ? faceFound / S.n : 0,
       legs: S.n ? legsSeen.filter(Boolean).length / S.n : 0,
       jumps: ground.jumps.length,
+      pinned: S.n ? pinned / S.n : 0,
+      depthTravel: depth ? Math.max(...depth.map(Math.abs)) : null,
       // How much of the take the floor could be read in, and how much of it
       // the camera was moving. A take tracked before the floor scan has none.
       floorScanned: (capture.version || 1) >= 2 ? scanned / Math.max(1, S.n) : null,

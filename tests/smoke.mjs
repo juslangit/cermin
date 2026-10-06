@@ -78,10 +78,13 @@ await context.grantPermissions(['camera'], { origin: `http://127.0.0.1:${ready.p
 const page = await context.newPage();
 const problems = [];
 page.on('pageerror', (e) => { problems.push(String(e)); console.log(`       page error: ${e.message}`); });
-page.on('console', (m) => { if (m.type() === 'error') problems.push(m.text()); });
+page.on('console', (m) => { if (m.type() === 'error') { problems.push(m.text()); if (process.env.VERBOSE) console.log(`       console: ${m.text().slice(0, 200)}`); } });
+page.on('requestfailed', (r) => { if (process.env.VERBOSE) console.log(`       failed: ${r.url()} ${r.failure() && r.failure().errorText}`); });
 
 await page.goto(ready.url);
-await page.waitForFunction(() => window.cermin && !cermin.state.characterLoading && cermin.man.avatar, null, { timeout: 15000 });
+await page.waitForFunction(() => window.cermin && !cermin.state.characterLoading, null, { timeout: 15000 });
+check(await page.evaluate(() => cermin.state.character === 'standard' && !cermin.man.avatar && cermin.man.root.visible),
+  'it opens on the standard mannequin');
 ok('the page loads');
 await page.waitForTimeout(500);
 await page.screenshot({ path: path.join(OUT, '1-empty.png') });
@@ -151,8 +154,9 @@ console.log(`       furthest the hips travel sideways: ${motion.travel.toFixed(2
 const floorOf = () => page.evaluate(() => {
   const s = window.cermin.state.solved;
   const lift = Math.max(...s.frames.map((f) => f.lift));
-  const wander = Math.max(...s.frames.map((f) => Math.hypot(f.hips[0], f.hips[2])));
+  const wander = Math.max(...s.frames.map((f) => Math.abs(f.hips[0])));
   return { lift, wander, jumps: s.jumps.length, high: Math.max(...s.frames.map((f) => f.hips[1])),
+    depth: Math.max(...s.frames.map((f) => Math.abs(f.hips[2]))),
     scanned: s.stats.floorScanned, moving: s.stats.cameraMoving };
 });
 const still = await floorOf();
@@ -160,6 +164,42 @@ console.log(`       still camera: ${still.jumps} jumps, highest lift ${still.lif
   + `floor read in ${(still.scanned * 100).toFixed(0)}%, camera moving in ${(still.moving * 100).toFixed(0)}%`);
 check(still.wander < 0.6, `he exercises on the spot, and travels no further than ${still.wander.toFixed(2)} m`);
 check(still.high < 1.3, `the hips never float (highest ${still.high.toFixed(2)} m; standing is 0.95)`);
+check(still.depth < 0.5, `standing on the spot, he does not drift toward the camera (${still.depth.toFixed(2)} m)`);
+
+// Foot sliding: how far a planted foot moves across the floor per frame,
+// with the planted feet kept still and without.
+const slide = () => page.evaluate(() => {
+  const { state, man } = window.cermin;
+  const names = Object.keys(man.bones);
+  const V = man.root.position.constructor;
+  let sum = 0, count = 0;
+  let prev = null;
+  for (const f of state.solved.frames) {
+    names.forEach((n, b) => man.bones[n].quaternion.fromArray(f.q, b * 4));
+    man.bones.Hips.position.fromArray(f.hips);
+    man.root.updateMatrixWorld(true);
+    const now = {};
+    for (const s of ['Left', 'Right']) {
+      const foot = man.bones[s + 'Foot'];
+      const low = Math.min(new V(0, -0.07, -0.05).applyMatrix4(foot.matrixWorld).y, new V(0, -0.07, 0.1).applyMatrix4(foot.matrixWorld).y, new V(0, -0.02, 0.06).applyMatrix4(man.bones[s + 'ToeBase'].matrixWorld).y);
+      now[s] = { at: foot.getWorldPosition(new V()), down: low < 0.035 && !f.air };
+      if (prev && prev[s].down && now[s].down) {
+        sum += Math.hypot(now[s].at.x - prev[s].at.x, now[s].at.z - prev[s].at.z); count++;
+      }
+    }
+    prev = now;
+  }
+  man.reset();
+  return count ? (sum / count) * 1000 : 0;          // millimetres per frame
+});
+const locked = await slide();
+await page.click('#opt-lock');
+await page.waitForTimeout(400);
+const loose = await slide();
+await page.click('#opt-lock');
+await page.waitForTimeout(400);
+console.log(`       a planted foot slides ${loose.toFixed(1)} mm a frame on its own, ${locked.toFixed(1)} mm kept still`);
+check(locked < loose * 0.4, 'keeping planted feet still cuts foot sliding by more than half');
 
 for (const [t, name] of [[1.0, '3-standing'], [5.2, '4-jack'], [9.0, '5-burpee']]) {
   await page.evaluate((t) => { const v = document.getElementById('video'); v.pause(); v.currentTime = t; }, t);
@@ -189,6 +229,7 @@ console.log(`       moving camera: ${moving.jumps} jumps, highest lift ${moving.
 check(moving.high < 1.3, `the hips do not float when the camera moves (highest ${moving.high.toFixed(2)} m)`);
 check(moving.lift < still.lift + 0.1, `no jump higher than the still camera's (${moving.lift.toFixed(2)} vs ${still.lift.toFixed(2)} m)`);
 check(moving.wander < 0.8, `and the camera does not carry him away (${moving.wander.toFixed(2)} m)`);
+check(moving.depth < 0.6, `nor toward it, though the camera zooms in and out (${moving.depth.toFixed(2)} m)`);
 await page.evaluate(() => { const v = document.getElementById('video'); v.pause(); v.currentTime = 2.0; });
 await page.waitForTimeout(700);
 await page.screenshot({ path: path.join(OUT, '4b-moving-camera.png') });
@@ -218,6 +259,33 @@ if (tuck.length) {
 await page.evaluate((t) => window.cermin.openTake(t), stillTake);
 await waitForTake();
 
+// ── 1d. coming closer ──────────────────────────────────────────────────────
+// The tuck-jump man standing, zoomed to 1.5x over three seconds. On a plain
+// white floor there is nothing for the floor scan to read, so this is him
+// coming closer - a third of the way, since he ends 1.5 times the size.
+console.log('\ncoming closer');
+await page.setInputFiles('#file', path.join(MEDIA, 'approach.webm'));
+await page.waitForTimeout(1500);
+await waitForTake();
+const near = await page.evaluate(() => {
+  const f = window.cermin.state.solved.frames;
+  return { start: f[5].hips[2], end: f[f.length - 6].hips[2], half: f[Math.floor(f.length / 2)].hips[2] };
+});
+console.log(`       toward the camera: ${near.start.toFixed(2)} → ${near.half.toFixed(2)} → ${near.end.toFixed(2)} m`);
+check(near.end > 0.5 && near.end > near.half && near.half > near.start,
+  'growing in the picture reads as walking toward the camera, steadily');
+await page.evaluate((t) => window.cermin.openTake(t), stillTake);
+await waitForTake();
+
+// ── 1e. trimming ───────────────────────────────────────────────────────────
+console.log('\ntrimming');
+const seekTo = (t) => page.evaluate((t) => { const v = document.getElementById('video'); v.pause(); v.currentTime = t; }, t);
+await seekTo(2.0); await page.waitForTimeout(400); await page.click('#trim-in');
+await seekTo(6.0); await page.waitForTimeout(400); await page.click('#trim-out');
+await page.waitForTimeout(800);
+const trim = await page.evaluate(() => window.cermin.state.trim);
+check(trim && trim[0] === 60 && trim[1] === 180, `the take is trimmed to frames ${trim}`);
+
 // ── 2. export ──────────────────────────────────────────────────────────────
 console.log('\nexport');
 const take = await page.evaluate(() => window.cermin.state.take);
@@ -227,18 +295,37 @@ for (const kind of ['glb', 'bvh', 'csv']) {
   await page.waitForTimeout(kind === 'glb' ? 2500 : 800);
 }
 const glb = path.join(takeDir, 'cermin.glb');
+const readGLB = (file) => {
+  const buf = fs.readFileSync(file);
+  return JSON.parse(buf.subarray(20, 20 + buf.readUInt32LE(12)).toString());
+};
 if (fs.existsSync(glb)) {
-  const buf = fs.readFileSync(glb);
-  const len = buf.readUInt32LE(12);
-  const doc = JSON.parse(buf.subarray(20, 20 + len).toString());
+  // The default: cermin's own standard mannequin.
+  const doc = readGLB(glb);
   const joints = doc.skins?.[0]?.joints?.length || 0;
   const anim = doc.animations?.[0];
   const morphs = (doc.meshes || []).flatMap((m) => m.extras?.targetNames || []);
-  check(joints === 23, `the downloaded wooden mannequin exports its original ${joints}-joint rig`);
-  check(anim && anim.channels.length >= 16, `and one animation with ${anim ? anim.channels.length : 0} channels`);
-  check(doc.images?.length > 0, 'and its original wood textures are embedded');
-  check(doc.nodes.some((n) => n.extras?.author === 'James Wright'), 'with the model author and license embedded');
+  check(joints === 65, `by default the .glb is the standard mannequin, ${joints} joints`);
+  check(anim && anim.channels.length > 40, `with one animation of ${anim ? anim.channels.length : 0} channels`);
+  check(morphs.includes('jawOpen') && morphs.includes('eyeBlinkLeft'), `and ${morphs.length} named face shapes`);
+  check(doc.nodes.some((n) => n.name === 'LeftHandIndex1'), 'with Mixamo bone names (LeftHandIndex1)');
 } else bad('the .glb was written');
+
+// A downloaded character instead: its own rig, textures and credit.
+await page.selectOption('#character', 'mannequin');
+await page.waitForFunction(() => window.cermin.state.character === 'mannequin' && !window.cermin.state.characterLoading);
+fs.rmSync(glb, { force: true });
+await page.click('[data-export="glb"]');
+for (let i = 0; i < 40 && !fs.existsSync(glb); i++) await page.waitForTimeout(250);
+await page.waitForTimeout(500);
+if (fs.existsSync(glb)) {
+  const doc = readGLB(glb);
+  const joints = doc.skins?.[0]?.joints?.length || 0;
+  check(joints === 23, `the wooden mannequin exports its original ${joints}-joint rig`);
+  check(doc.images?.length > 0, 'with its wood textures embedded');
+  check(doc.nodes.some((n) => n.extras?.author === 'James Wright'), 'and its author and licence');
+} else bad('the wooden mannequin .glb was written');
+await page.selectOption('#character', 'standard');
 
 const bvh = path.join(takeDir, 'cermin.bvh');
 if (fs.existsSync(bvh)) {
@@ -247,7 +334,7 @@ if (fs.existsSync(bvh)) {
   const rows = text.split('MOTION')[1].trim().split('\n').slice(2);
   const widths = new Set(rows.map((r) => r.trim().split(/\s+/).length));
   check(text.startsWith('HIERARCHY\nROOT Hips'), 'the .bvh starts with its hierarchy');
-  check(rows.length === 360, `and has 360 frames of motion (${rows.length})`);
+  check(rows.length === 121, `and has the 121 trimmed frames of motion (${rows.length})`);
   check(widths.size === 1 && widths.has(channels), `every row has all ${channels} channels`);
 } else bad('the .bvh was written');
 
@@ -271,13 +358,17 @@ if (args.includes('--fbx')) {
 // ── 3. reopening ───────────────────────────────────────────────────────────
 console.log('\ntakes');
 const listed = await page.$$eval('.take', (rows) => rows.length);
-check(listed === 3, 'all three takes are listed');
+check(listed === 4, 'all four takes are listed');
 await page.reload();
-await page.waitForFunction(() => document.querySelectorAll('.take').length === 3);
+await page.waitForFunction(() => document.querySelectorAll('.take').length === 4);
 await page.locator('.take', { hasText: 'jumping12' }).filter({ hasNotText: 'moving' }).click();
 await waitForTake();
 const again = await page.evaluate(() => window.cermin.state.solved.frames.length);
 check(again === 360, 'it reopens from disk without tracking again');
+const kept = await page.evaluate(() => window.cermin.state.trim);
+check(kept && kept[0] === 60 && kept[1] === 180, `and with its trim (${kept})`);
+await page.click('#trim-clear');
+await page.waitForTimeout(500);
 
 // ── 4. record ──────────────────────────────────────────────────────────────
 console.log('\nrecord');

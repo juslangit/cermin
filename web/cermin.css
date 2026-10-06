@@ -166,3 +166,14 @@
 #character-credit, #character-capabilities { width: 100%; font-size: .72rem; line-height: 1.4; color: var(--ink-faint); }
 #character-credit:hover { color: var(--tool); }
 #character-status:empty { display: none; }
+
+/* Trimming: where the take starts and ends, shown on the scrubber. */
+.trim { display: flex; gap: 6px; flex: none; }
+.trim .btn-quiet { background: none; }
+#scrub.is-trimmed { background: transparent; }
+.scrub-wrap { position: relative; flex: 1; display: flex; align-items: center; }
+.scrub-wrap input { flex: 1; position: relative; z-index: 1; }
+.trim-band {
+  position: absolute; top: 50%; height: 8px; margin-top: -4px; border-radius: 4px;
+  background: color-mix(in srgb, var(--tool) 35%, transparent); pointer-events: none;
+}

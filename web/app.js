@@ -68,7 +68,9 @@ const solveOptions = () => ({
   root: opt.root(),
   hands: $('opt-hands').checked,
   face: $('opt-face').checked,
+  lockFeet: $('opt-lock').checked,
 });
+$('opt-lock').addEventListener('change', () => resolve());
 
 // --------------------------------------------------------------------------
 // the viewport
@@ -109,13 +111,38 @@ const grid = new THREE.GridHelper(24, 48, '#2f3542', '#232731');
 grid.position.y = 0.001;
 scene.add(grid);
 
+// A new key on 2026-10-06, when the standard mannequin became the default
+// again: a choice remembered under the old key was made when there was no
+// standard mannequin to choose.
+const CHARACTER_KEY = 'cermin.character.v2';
+
 const man = buildMannequin();
 scene.add(man.root);
 man.root.visible = false;
 const mixer = new THREE.AnimationMixer(man.root);
 
 let characterRequest = 0;
+/* The standard mannequin is cermin's own: 65 bones with Mixamo names,
+ * fingers and a face with ARKit shapes, so an export opens as a standard
+ * humanoid in Blender, Unreal and gerak. It is the default. The downloaded
+ * characters below it are for seeing the motion on a real body. */
+function useStandard() {
+  ++characterRequest;
+  if (man.avatar) { scene.remove(man.avatar.root); man.avatar.dispose(); man.avatar = null; }
+  man.root.visible = true;
+  state.character = 'standard';
+  state.characterLoading = false;
+  $('character').value = 'standard';
+  $('character-status').textContent = '';
+  const credit = $('character-credit');
+  credit.removeAttribute('href');
+  credit.textContent = '';
+  $('character-capabilities').textContent = 'Body, fingers and face. Standard bone names — opens as a humanoid in Blender, Unreal and gerak.';
+  try { localStorage.setItem(CHARACTER_KEY, 'standard'); } catch (_) { /* optional preference */ }
+}
+
 async function changeCharacter(name) {
+  if (name === 'standard') { useStandard(); return; }
   const request = ++characterRequest;
   state.characterLoading = true;
   $('character-status').textContent = 'Loading character…';
@@ -127,6 +154,7 @@ async function changeCharacter(name) {
     scene.add(avatar.root);
     avatar.sync(man);
     if (previous) { scene.remove(previous.root); previous.dispose(); }
+    man.root.visible = false;
     const credit = $('character-credit');
     credit.href = avatar.root.userData.source;
     credit.textContent = `${avatar.info.title} · ${avatar.info.author} · CC BY`;
@@ -135,7 +163,7 @@ async function changeCharacter(name) {
       : 'Body + wrists. Finger and face motion are saved; this wooden model has no finger or expression rig.';
     state.character = name;
     $('character').value = name;
-    try { localStorage.setItem('cermin.character', name); } catch (_) { /* optional preference */ }
+    try { localStorage.setItem(CHARACTER_KEY, name); } catch (_) { /* optional preference */ }
   } catch (error) {
     if (request !== characterRequest) return;
     $('character').value = state.character;
@@ -198,6 +226,12 @@ function frameIndex() {
 
 function tick() {
   requestAnimationFrame(tick);
+  if (state.mode === 'take' && state.action && state.trim && !video.paused) {
+    const fps = state.capture.fps;
+    if (video.currentTime > (state.trim[1] + 1) / fps || video.currentTime < state.trim[0] / fps - 0.05) {
+      video.currentTime = state.trim[0] / fps;
+    }
+  }
   if (state.mode === 'take' && state.action) {
     mixer.setTime(Math.min(video.currentTime, state.clip.duration - 1e-4));
     frameFollow();
@@ -323,6 +357,8 @@ async function captureVideo(blob, label, ext) {
     await putFile(take, 'capture.json', JSON.stringify(capture));
     state.take = take;
     state.capture = capture;
+    state.trim = null;
+    showTrim();
     resolve();
     await putFile(take, 'take.json', JSON.stringify({
       label, video: capture.video, duration: capture.duration, fps,
@@ -398,6 +434,7 @@ async function retrack() {
     await putFile(take, 'take.json', JSON.stringify({
       label: old.source || take, video: capture.video, duration: capture.duration, fps: capture.fps,
       frames: capture.frames.length, stats: state.solved.stats, created: new Date().toISOString(),
+      trim: state.trim ? state.trim.map((f) => f / capture.fps) : null,
     }));
     await listTakes();
     video.currentTime = 0;
@@ -465,6 +502,8 @@ function setMode(mode) {
   document.querySelectorAll('[data-export]').forEach((b) => { b.disabled = !ready; });
   $('reveal').disabled = !ready;
   $('to-gerak').disabled = !ready;
+  $('trim-in').disabled = !ready;
+  $('trim-out').disabled = !ready;
   $('retrack').disabled = !ready;
   $('scrub').disabled = !ready;
   document.body.classList.toggle('is-live', mode === 'live');
@@ -691,6 +730,7 @@ async function openTake(name) {
     state.take = name;
     state.capture = capture;
     resolve();
+    await loadTrim(name, capture);
     // A take from before the floor scan says so, and offers the way to get one.
     if (state.solved.stats.floorScanned === null) {
       say('This take was tracked before cermin scanned the floor. Press "Track this video again" to scan it as well.');
@@ -708,6 +748,92 @@ async function openTake(name) {
 // export
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// trimming
+// --------------------------------------------------------------------------
+
+/* Where the take starts and ends, in frames, kept in take.json beside it.
+ * Playback loops inside it, and everything that leaves cermin - the files and
+ * the hand-over to gerak - is only that part, starting on the spot. */
+state.trim = null;
+
+function trimmedSolved() {
+  const s = state.solved;
+  if (!s || !state.trim) return s;
+  const [a, b] = state.trim;
+  const frames = s.frames.slice(a, b + 1);
+  // Start where the trimmed take starts: across and toward the camera from
+  // there, so a clip dropped into a game begins on its own spot.
+  const [x0, , z0] = frames[0].hips;
+  return {
+    ...s,
+    frames: frames.map((f) => ({ ...f, hips: [f.hips[0] - x0, f.hips[1], f.hips[2] - z0] })),
+    faceAll: s.faceAll.slice(a, b + 1),
+  };
+}
+function exportClip() {
+  return state.trim ? buildClip(trimmedSolved(), state.take || 'cermin') : state.clip;
+}
+
+function showTrim() {
+  const band = $('trim-band');
+  const n = state.capture ? state.capture.frames.length : 0;
+  $('trim-clear').hidden = !state.trim;
+  if (!state.trim || !n) { band.hidden = true; return; }
+  band.hidden = false;
+  band.style.left = `${(100 * state.trim[0]) / n}%`;
+  band.style.width = `${(100 * (state.trim[1] - state.trim[0] + 1)) / n}%`;
+}
+
+async function saveTrim() {
+  showTrim();
+  if (!state.take) return;
+  try {
+    const res = await fetch(takeURL(state.take, 'take.json'));
+    const info = res.ok ? await res.json() : {};
+    info.trim = state.trim ? state.trim.map((f) => f / state.capture.fps) : null;
+    await putFile(state.take, 'take.json', JSON.stringify(info));
+  } catch (err) {
+    say(`The trim could not be saved: ${err.message}`, true);
+  }
+}
+
+function setTrim(end) {
+  if (!state.capture) return;
+  const n = state.capture.frames.length;
+  const here = frameIndex();
+  let [a, b] = state.trim || [0, n - 1];
+  if (end === 'in') a = here; else b = here;
+  if (b - a < 2) { say('The end has to come after the start.', true); return; }
+  state.trim = (a === 0 && b === n - 1) ? null : [a, b];
+  saveTrim();
+  const fmtF = (f) => fmt(f / state.capture.fps);
+  if (state.trim) say(`The take is now ${fmtF(a)} to ${fmtF(b)} — exports and gerak get only that.`);
+}
+$('trim-in').addEventListener('click', () => setTrim('in'));
+$('trim-out').addEventListener('click', () => setTrim('out'));
+$('trim-clear').addEventListener('click', () => { state.trim = null; saveTrim(); say('The whole video again.'); });
+document.addEventListener('keydown', (e) => {
+  if (e.target.closest('input, textarea, select') || state.mode !== 'take') return;
+  if (e.key === 'i') setTrim('in');
+  if (e.key === 'o') setTrim('out');
+});
+
+async function loadTrim(take, capture) {
+  state.trim = null;
+  try {
+    const res = await fetch(takeURL(take, 'take.json'));
+    const info = res.ok ? await res.json() : {};
+    if (Array.isArray(info.trim)) {
+      const n = capture.frames.length;
+      const a = Math.max(0, Math.round(info.trim[0] * capture.fps));
+      const b = Math.min(n - 1, Math.round(info.trim[1] * capture.fps));
+      if (b - a >= 2) state.trim = [a, b];
+    }
+  } catch { /* no trim */ }
+  showTrim();
+}
+
 async function exportAs(kind) {
   if (!state.solved || !state.take) return;
   if (state.characterLoading) { say('Wait for the character to finish loading, then export.'); return; }
@@ -715,7 +841,7 @@ async function exportAs(kind) {
   try {
     if (kind === 'glb' || kind === 'fbx') {
       working(true, 'Writing the .glb', '');
-      const buf = await toGLB(man, state.clip);
+      const buf = await toGLB(man, exportClip());
       await putFile(take, 'cermin.glb', buf);
       if (kind === 'fbx') {
         working(true, 'Making the .fbx in Blender', 'Through the shared Blender — it opens hidden if it is not running.');
@@ -723,10 +849,10 @@ async function exportAs(kind) {
         if (!answer.ok) throw new Error(answer.problem || 'Blender could not write the .fbx.');
       }
     } else if (kind === 'bvh') {
-      await putFile(take, 'cermin.bvh', toBVH(state.solved));
+      await putFile(take, 'cermin.bvh', toBVH(trimmedSolved()));
     } else if (kind === 'csv') {
-      if (!state.solved.faceAll.some(Boolean)) throw new Error('No face was captured in this take.');
-      await putFile(take, 'face.csv', toFaceCSV(state.solved));
+      if (!trimmedSolved().faceAll.some(Boolean)) throw new Error('No face was captured in this part of the take.');
+      await putFile(take, 'face.csv', toFaceCSV(trimmedSolved()));
     }
     const file = kind === 'csv' ? 'face.csv' : `cermin.${kind}`;
     say(`Saved ${file} in the take's folder.`);
@@ -758,7 +884,7 @@ if (window.bengkel) {
     send.disabled = true;
     try {
       working(true, 'Writing the .glb for gerak', '');
-      const saved = await putFile(state.take, 'cermin.glb', await toGLB(man, state.clip));
+      const saved = await putFile(state.take, 'cermin.glb', await toGLB(man, exportClip()));
       const label = (state.capture && state.capture.source) || state.take;
       await window.bengkel.handOver('gerak', saved.path, label);
       listTakes();
@@ -786,6 +912,6 @@ refinerAvailable().then((ok) => {
 window.cermin = { state, man, solve, captureVideo, openTake, exportAs, renderer, setView, changeCharacter };
 listTakes().catch(() => {});
 let savedCharacter;
-try { savedCharacter = localStorage.getItem('cermin.character'); } catch (_) { /* optional preference */ }
-changeCharacter(CHARACTERS.includes(savedCharacter) ? savedCharacter : 'mannequin');
+try { savedCharacter = localStorage.getItem(CHARACTER_KEY); } catch (_) { /* optional preference */ }
+changeCharacter(savedCharacter === 'standard' || CHARACTERS.includes(savedCharacter) ? savedCharacter : 'standard');
 tick();

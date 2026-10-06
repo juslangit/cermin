@@ -25,35 +25,64 @@ so a take never leaves the Mac.
    saved.
 3. **Solved.** The points become bone rotations on the mannequin: smoothed
    forwards and backwards so nothing lags, the camera levelled, the feet put
-   on the floor, a jump kept as a jump. Changing **Smoothing** or **Moving
-   around** re-solves immediately; nothing is tracked twice.
+   on the floor, a jump kept as a jump. Changing anything under **Clean-up**
+   re-solves immediately; nothing is tracked twice.
 4. **Out.** `.glb` (mannequin + animation), `.fbx` (made by Blender), `.bvh`
    (skeleton only) and `face.csv` (the 51 face values per frame, ARKit names).
+   Inside bengkel, **Send to gerak** hands the take across to be cleaned up by
+   hand.
+
+### Tracking: Best, Accurate, Fast
+
+**Best** (the default) looks at every frame twice: MediaPipe, then DWPose -
+a much larger model that places legs and feet far better under loose
+clothes - folded back into 3D by bone length. About twice as slow as
+**Accurate**. Its model is 134 MB and kept out of git:
+
+```bash
+tools/fetch-models.sh      # once, on a fresh copy
+```
+
+### The virtual floor
+
+While tracking, cermin scans the floor beside the feet in every frame, so it
+knows when the camera moves, turns or zooms. The feet stay on the floor, and
+the body leaves it only for a real jump: the hips rise, the time in the air
+fits gravity, the body is upright. A ring under the feet shows the floor.
+
+### Clean-up
+
+- **Keep planted feet still** - a foot on the floor is pinned to its spot and
+  the leg bends to reach it, so feet do not slide.
+- **Follow the person** - across the floor and toward or away from the
+  camera, with the camera's own movement taken off. **Stay in place** keeps
+  only the jumps.
+- **Start here / End here** (or `I` / `O`) - trim the take. Playback loops
+  inside it, and exports and gerak get only that part, starting on the spot.
 
 Every take lives in `~/Documents/bengkel/cermin/takes/<date>-<name>/` with its
 video, its raw capture and whatever was exported from it.
 
 ## Character choices
 
-The dropdown offers a wooden mannequin, a human skeleton, a clothed stylized man
-and a clothed stylized woman. These are downloaded, artist-made models: see
-[model credits and licenses](web/characters/README.md).
+The default is cermin's own **standard mannequin**: 65 bones with Mixamo
+names, articulated fingers and a face with 22 ARKit shapes, so an export opens
+as a standard humanoid in Blender, Unreal and gerak.
 
-Cermin solves movement on its internal 65-bone Mixamo-named rig, then retargets it
-onto the selected model's original skeleton. GLB and FBX contain that character,
-its textures and animation; BVH contains the canonical motion skeleton.
-Selection is remembered and switching keeps the current take and pose.
-
-Facial expressions are captured in `face.csv` (51 ARKit values), but these models
-have no compatible expression shapes. The wooden mannequin has solid hands;
-the skeleton and both people have articulated fingers.
+The dropdown also offers a wooden mannequin, a human skeleton, a clothed
+stylized man and a clothed stylized woman - downloaded, artist-made models
+(see [model credits and licenses](web/characters/README.md)). The motion is
+retargeted onto each model's own skeleton, and GLB and FBX then contain that
+character with its textures. Those models have no expression shapes (the face
+is still in `face.csv`), and the wooden mannequin has solid hands.
 
 ## Getting good captures
 
 - The whole body in the picture, if the legs matter. With only the top half
   showing, cermin keeps the torso upright and the legs standing still.
-- A camera that does not move. cermin follows the person across the picture,
-  so a moving camera reads as the person moving.
+- A camera that moves is fine - the floor scan takes it off - but a floor
+  with some texture helps it. On a plain floor, a camera moving in reads as
+  the person coming closer.
 - Film from the front or the side. From behind, a single camera cannot tell
   how far forward a knee or an elbow is, and the mannequin shows that.
 - One person, plain light, clothes that do not hide the joints.
@@ -80,11 +109,10 @@ From Wikimedia Commons, trimmed:
 - `squat.webm` — *Squat - exercise demonstration video*, CC BY 3.0
 - `signs10.webm` — *Alphabets - Ghanaian Sign Language*, by Uprising Man, CC0
 
-## Joining bengkel
+## In bengkel
 
-cermin is written to the same contract as bengkel's tools — a token per run,
-an origin check, a ready line (`@@CERMIN-READY@@`), `--no-open`,
-`BENGKEL_DATA` and `BENGKEL_PARENT` — so joining the rail is an entry in
-bengkel's `tools.json`. `web/common/` is a copy of bengkel's shared look and
-goes away when it moves in. `.fbx` already goes through bengkel's shared
-Blender MCP.
+cermin is on bengkel's rail, between periksa and gerak, and still runs on its
+own. It follows bengkel's tool contract - a token per run, an origin check, a
+ready line (`@@CERMIN-READY@@`), `--no-open`, `BENGKEL_DATA`, `BENGKEL_PARENT`
+- and `.fbx` goes through bengkel's shared Blender MCP. `web/common/` is a
+copy of bengkel's shared look, so cermin works without bengkel next to it.

@@ -196,6 +196,51 @@ export function travelAcross(hipX, pxPerM, floorDx, width) {
   });
 }
 
+/**
+ * How far the person has moved toward the camera (+) or away from it (-),
+ * in metres.
+ *
+ * Someone twice as far away is half the size in the picture. So the person's
+ * own size (from upright frames only - a body folding forward is the least
+ * trustworthy) against their size
+ * at the start gives the change in distance, once the camera's own moving in
+ * or out is taken off - which the floor scan measured, as how much the floor
+ * beside the feet spread out (floor.js). How far away they started needs the
+ * lens: a phone's main camera sees about 69 degrees across its long side,
+ * which puts the focal length at 0.72 of the picture's long side.
+ *
+ *   pxPerM[i]    how big the person is in the picture, this frame (sizeInPicture
+ *                in solve.js: pixels per metre, bone by bone, turning allowed for)
+ *   zoom[i]      how much the floor at the person spread out since the last
+ *                frame (0.01 = 1% bigger), or NaN where it was not read
+ *   upright[i]   whether the body was standing, so its size can be trusted
+ */
+export function travelDepth(pxPerM, zoom, upright, longSide, fps) {
+  const n = pxPerM.length;
+  const focal = 0.72 * longSide;
+  let camera = 1, last = 0;
+  const sizes = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (Number.isFinite(zoom[i])) camera *= 1 + zoom[i];
+    if (!Number.isFinite(pxPerM[i]) || upright[i] === false) continue;
+    sizes[i] = pxPerM[i] / camera;                   // the person's own size, camera taken off
+  }
+  // Where they started: the middle size over the first half-second it was read.
+  const first = sizes.filter(Number.isFinite).slice(0, Math.max(3, Math.round(fps / 2)));
+  const start = first.length ? first.sort((a, b) => a - b)[Math.floor(first.length / 2)] : NaN;
+  const raw = sizes.map((size) => (Number.isFinite(size) && Number.isFinite(start)
+    ? focal / start - focal / size : NaN));
+  // Steadied: the middle value over a second, then eased both ways in time
+  // so it neither shakes nor lags - and held through frames it could not be
+  // read. A person walks closer over seconds; anything quicker is the tracker.
+  const steady = rollingMedian(raw, Math.round(fps / 2)).map((z) => (Number.isFinite(z) ? (last = z) : last));
+  const ease = 1 - Math.exp(-1 / (0.4 * fps));
+  const fwd = steady.slice(), back = steady.slice();
+  for (let i = 1; i < n; i++) fwd[i] = fwd[i - 1] + ease * (steady[i] - fwd[i - 1]);
+  for (let i = n - 2; i >= 0; i--) back[i] = back[i + 1] + ease * (steady[i] - back[i + 1]);
+  return fwd.map((z, i) => (z + back[i]) / 2);
+}
+
 /** Pixels per metre at the person, frame by frame, steadied over half a second. */
 export function scaleAtPerson(torsoPx, legPx, torsoM, legM, fps) {
   // A body bending away shortens in the picture, so whichever of the torso

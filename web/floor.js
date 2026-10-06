@@ -143,7 +143,7 @@ export class FloorScan {
         // one turn, and only the turn is kept. Taking the patches' middle
         // value instead added the spread up frame after frame and carried a
         // man doing burpees on the spot a metre and a half.
-        let dx = 0;
+        let dx = 0, zoom = 0;
         const xs = moves.map((m) => m.x - this.w / 2);
         const span = Math.max(...xs) - Math.min(...xs);
         if (span > PATCH_W) {
@@ -154,6 +154,10 @@ export class FloorScan {
           moves.forEach((m, k) => { sxx += (xs[k] - mx) ** 2; sxd += (xs[k] - mx) * (m.dx - md); });
           const spread = sxx > 0 ? sxd / sxx : 0;
           dx = md - spread * mx;                         // the movement at the middle: the turn
+          // And the spread itself: how much bigger the floor at the person's
+          // distance got this frame - the camera moving in (or out). The
+          // depth pass takes it off the person's own growth in the picture.
+          if (Math.abs(spread) > 0.0015) zoom = spread;
         }
         let dy = mid(moves.map((m) => m.dy));
         // A still floor reads a few hundredths of a pixel either way; summed
@@ -163,6 +167,7 @@ export class FloorScan {
         out = {
           dx: Math.round((dx / this.w) * 1e5) / 1e5,
           dy: Math.round((dy / this.h) * 1e5) / 1e5,
+          zoom: Math.round(zoom * 1e5) / 1e5,
           n: moves.length,
         };
       }

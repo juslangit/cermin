@@ -57,7 +57,14 @@ export function buildClip(solved, name = 'cermin') {
 
 /** The selected character in its calibrated T-pose, with the retargeted take. */
 export async function toGLB(mannequin, clip) {
-  if (!mannequin.avatar) throw new Error('Load a character before exporting.');
+  // The standard mannequin: cermin's own 65-bone skeleton, Mixamo names,
+  // fingers and face shapes - the clip is already its own.
+  if (!mannequin.avatar) {
+    mannequin.reset();
+    return new GLTFExporter().parseAsync(mannequin.root, {
+      binary: true, animations: [clip], onlyVisible: true,
+    });
+  }
   const avatar = mannequin.avatar;
   const animation = retargetClip(mannequin, clip);
   avatar.reset();
