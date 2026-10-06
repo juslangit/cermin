@@ -339,7 +339,17 @@ if (fs.existsSync(bvh)) {
 } else bad('the .bvh was written');
 
 const csv = path.join(takeDir, 'face.csv');
-if (fs.existsSync(csv)) {
+// His face is a few pixels across in this clip; whether the tracker caught it
+// inside the trimmed part is luck. With a face the .csv is written; without,
+// cermin must say so rather than write an empty file.
+const faceInTrim = await page.evaluate(() => {
+  const { state } = window.cermin;
+  const [a, b] = state.trim || [0, state.solved.faceAll.length - 1];
+  return state.solved.faceAll.slice(a, b + 1).some(Boolean);
+});
+if (!faceInTrim) {
+  check(!fs.existsSync(csv), 'no face in the trimmed part, so no empty face .csv is written');
+} else if (fs.existsSync(csv)) {
   const lines = fs.readFileSync(csv, 'utf8').trim().split('\n');
   // MediaPipe gives ARKit's 52 shapes less tongueOut, plus a _neutral that is left out.
   check(lines[0].split(',').length === 52, `the face .csv has time plus 51 ARKit shapes (${lines[0].split(',').length - 1})`);
@@ -448,6 +458,16 @@ check(close.stats.legs < 0.2, `the legs are out of the picture (${(close.stats.l
 check(close.curl > 0.03, `the fingers open and close (the fingertip moves ${(close.curl * 100).toFixed(1)} cm against the wrist)`);
 check(close.mouth > 0.3, `the mouth moves (strongest mouth shape ${close.mouth.toFixed(2)})`);
 console.log(`       blink up to ${close.blink.toFixed(2)}; camera levelled by ${close.cal.level.toFixed(1)}°, head neutral ${close.cal.headPitch.toFixed(1)}°`);
+const signsTake = await page.evaluate(() => window.cermin.state.take);
+await page.click('[data-export="csv"]');
+const signsCsv = path.join(DATA, 'takes', signsTake, 'face.csv');
+for (let i = 0; i < 40 && !fs.existsSync(signsCsv); i++) await page.waitForTimeout(250);
+if (fs.existsSync(signsCsv)) {
+  const lines = fs.readFileSync(signsCsv, 'utf8').trim().split('\n');
+  // MediaPipe gives ARKit's 52 shapes less tongueOut, plus a _neutral left out.
+  check(lines[0].split(',').length === 52 && lines.length === 301,
+    `his face .csv has time plus 51 ARKit shapes, for all 300 frames (${lines[0].split(',').length - 1} shapes, ${lines.length - 1} rows)`);
+} else bad('the close-up face .csv was written');
 for (const [t, name] of [[2.0, '8-signs-a'], [6.0, '9-signs-b']]) {
   await page.evaluate((t) => { const v = document.getElementById('video'); v.pause(); v.currentTime = t; }, t);
   await page.waitForTimeout(700);

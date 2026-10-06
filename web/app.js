@@ -348,7 +348,10 @@ async function captureVideo(blob, label, ext) {
     const saving = putFile(take, `video.${ext}`, blob);
 
     const fps = Number(opt.fps());
-    const capture = await track(fps);
+    working(true, 'Saving the video', '');
+    await saving;
+    const capture = await track(fps, take);
+    api('/api/frames-clear', { take }).catch(() => {});
     capture.source = label;
     capture.video = `video.${ext}`;
 
@@ -394,14 +397,27 @@ async function bestRefiner() {
   return state.refiner;
 }
 
-/** Track whatever video is loaded, showing how far along it is. */
-async function track(fps) {
+/** Track whatever video is loaded, showing how far along it is.
+ *  With `take`, the frames are cut from that take's video on disk by ffmpeg
+ *  (see cut_frames in server.py) rather than read by seeking the video. */
+async function track(fps, take) {
   const T = await fileTrackers();
   const refiner = await bestRefiner();
+  let frameURL = null;
+  if (take) {
+    working(true, 'Cutting the video into frames', 'So every frame is exactly the picture it should be.');
+    const cut = await api('/api/frames', { take, fps }).catch((err) => ({ ok: false, problem: err.message }));
+    if (cut.ok) {
+      frameURL = (n) => `/api/frame?t=${encodeURIComponent(TOKEN)}&take=${encodeURIComponent(take)}&fps=${fps}&n=${Math.min(n, cut.count - 1)}`;
+    } else {
+      console.warn('cermin: frames not cut, seeking the video instead -', cut.problem);
+    }
+  }
   const started = performance.now();
   return trackVideo(T, video, {
     fps,
     refiner,
+    frameURL,
     cancelled: () => state.cancel,
     onProgress: (done, total, frame) => {
       drawOverlay(octx, frame, overlay.width, overlay.height);
@@ -424,7 +440,8 @@ async function retrack() {
   showWorking(true);
   try {
     video.pause();
-    const capture = await track(Number(opt.fps()));
+    const capture = await track(Number(opt.fps()), take);
+    api('/api/frames-clear', { take }).catch(() => {});
     capture.source = old.source;
     capture.video = old.video;
     working(true, 'Saving the take', '');

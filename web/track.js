@@ -132,6 +132,48 @@ function once(el, event, ms = 3000) {
   });
 }
 
+/* Seeking, and being sure the picture really moved.
+ *
+ * In WebKit - bengkel's window, and Safari - "seeked" can arrive while the
+ * picture on hand is still an old one, especially while the graphics card is
+ * busy with the Best model. On a dance video that gave 105 different poses
+ * across 768 frames, cycling, and a mannequin frozen in one twisted shape.
+ * So after each seek, wait for the browser to say which frame it is now
+ * showing (requestVideoFrameCallback), and seek again until it is this one.
+ * Chrome shows the right frame at once and passes straight through. */
+async function seekExactly(video, t) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    video.currentTime = t;
+    await once(video, 'seeked');
+    if (!video.requestVideoFrameCallback) return true;
+    const shown = await new Promise((resolve) => {
+      const id = video.requestVideoFrameCallback((_, meta) => resolve(meta.mediaTime));
+      setTimeout(() => { if (video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(id); resolve(null); },
+        150 + attempt * 100);
+    });
+    // Within a source frame of where we asked (a 24 fps video's frame is 42 ms).
+    if (shown !== null && Math.abs(shown - t) < 0.045) return true;
+    if (shown === null && attempt > 0) return true;    // nothing more to learn from waiting
+    // Nudge it off and back, which makes WebKit decode afresh.
+    video.currentTime = Math.max(0, t - 0.25);
+    await once(video, 'seeked', 1000);
+  }
+  return false;
+}
+
+/** A canvas holding a copy of the video's current frame, refreshed on each call. */
+function snapshot(video) {
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  canvas.videoWidth = video.videoWidth;            // so readers can treat it like the video
+  canvas.videoHeight = video.videoHeight;
+  const grab = () => { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); return canvas; };
+  grab.canvas = canvas;
+  return grab;
+}
+
 /** A recorded .webm says its length is Infinity until it has been read to the end. */
 export async function settleDuration(video) {
   if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
@@ -146,7 +188,17 @@ export async function settleDuration(video) {
  * Track a whole video, one frame at a time.
  * onProgress(done, total, frame) is called after every frame.
  */
-export async function trackVideo(T, video, { fps = 30, onProgress, cancelled, refiner = null } = {}) {
+/** A picture from disk, drawn into the snapshot canvas. */
+async function drawFrame(url, canvas) {
+  const res = await fetch(url);
+  if (!res.ok) return false;
+  const bitmap = await createImageBitmap(await res.blob());
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return true;
+}
+
+export async function trackVideo(T, video, { fps = 30, onProgress, cancelled, refiner = null, frameURL = null } = {}) {
   const duration = await settleDuration(video);
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('That video has no length the browser can read.');
   video.pause();
@@ -155,20 +207,33 @@ export async function trackVideo(T, video, { fps = 30, onProgress, cancelled, re
   const start = T.clock;
   const frames = [];
   const floor = new FloorScan(video);
+  const shot = snapshot(video);
+  let stale = 0;
   for (let n = 0; n < total; n++) {
     if (cancelled && cancelled()) throw new Error('cancelled');
     const t = Math.min(duration - 0.001, n / fps + 0.0005);
-    video.currentTime = t;
-    await once(video, 'seeked');
-    const frame = detect(T, video, start + (n * 1000) / fps);
+    // The frame itself: cut by ffmpeg when the server could (always the
+    // right picture), otherwise by seeking the video and checking it moved.
+    let picture;
+    if (frameURL && await drawFrame(frameURL(n), shot.canvas)) {
+      picture = shot.canvas;
+      if (n % 3 === 0) video.currentTime = t;     // keep the picture on screen roughly in step
+    } else {
+      if (!(await seekExactly(video, t))) stale++;
+      // One copy of this frame, read by all three - so they cannot each
+      // catch a different moment of a picture still changing underneath.
+      picture = shot();
+    }
+    const frame = detect(T, picture, start + (n * 1000) / fps);
     frame.t = r4(t);
-    frame.floor = floor.step(video, frame.pose);
+    frame.floor = floor.step(picture, frame.pose);
     // The second, closer look (refine.js): DWPose's points for legs and feet.
-    if (refiner && frame.pose) frame.dw = await refiner.run(video, frame.pose);
+    if (refiner && frame.pose) frame.dw = await refiner.run(picture, frame.pose);
     frames.push(frame);
     if (onProgress) onProgress(n + 1, total, frame);
     if (n % 4 === 3) await new Promise((r) => setTimeout(r, 0));   // let the page draw
   }
+  if (stale) console.warn(`cermin: ${stale} of ${total} frames could not be confirmed after seeking`);
   return {
     version: 3,                 // 2: the floor's movement; 3: DWPose's points, when refined
     fps,

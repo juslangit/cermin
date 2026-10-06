@@ -120,6 +120,55 @@ def list_takes():
 
 
 # --------------------------------------------------------------------------
+# frames, cut by ffmpeg
+# --------------------------------------------------------------------------
+
+# Where ffmpeg might be. bengkel starts its tools from the Dock, whose PATH
+# does not include Homebrew, so the usual places are tried by name too.
+FFMPEG = next((p for p in (shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg",
+                           "/usr/local/bin/ffmpeg") if p and os.path.isfile(p)), None)
+
+
+def frames_dir(folder, fps):
+    return os.path.join(folder, ".frames-%d" % fps)
+
+
+def cut_frames(folder, fps):
+    """Every frame the tracker will look at, as a picture on disk.
+
+    Tracking used to step the <video> along by seeking it. In WebKit -
+    bengkel's window - a seek can leave an old picture on hand, above all
+    while the graphics card is busy with the Best model, and a dance video
+    came out as 105 poses cycling over 768 frames. A JPEG decoded from disk
+    is always the picture it says it is. ffmpeg's fps filter picks the
+    frame nearest each 1/fps of a second, which is where the tracker asks.
+    """
+    if not FFMPEG:
+        return {"ok": False, "problem": "ffmpeg is not on this Mac"}
+    video = next((os.path.join(folder, n) for n in ("video.mp4", "video.webm", "video.mov", "video.m4v")
+                  if os.path.isfile(os.path.join(folder, n))), None)
+    if not video:
+        return {"ok": False, "problem": "the take has no video on disk yet"}
+    out = frames_dir(folder, fps)
+    done = os.path.join(out, "done")
+    if not os.path.isfile(done):
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out)
+        started = time.time()
+        result = subprocess.run(
+            [FFMPEG, "-loglevel", "error", "-y", "-i", video, "-vf", "fps=%d" % fps,
+             "-q:v", "3", "-start_number", "0", os.path.join(out, "%06d.jpg")],
+            capture_output=True, text=True, timeout=1800)
+        if result.returncode != 0:
+            shutil.rmtree(out, ignore_errors=True)
+            return {"ok": False, "problem": "ffmpeg: " + result.stderr.strip()[-300:]}
+        open(done, "w").close()
+        log("cut %d frames at %d fps in %.1fs" % (len(os.listdir(out)) - 1, fps, time.time() - started))
+    count = len([n for n in os.listdir(out) if n.endswith(".jpg")])
+    return {"ok": True, "count": count}
+
+
+# --------------------------------------------------------------------------
 # .fbx, through the shared Blender
 # --------------------------------------------------------------------------
 
@@ -170,6 +219,28 @@ def to_fbx(folder):
 # --------------------------------------------------------------------------
 # the server
 # --------------------------------------------------------------------------
+
+def write_patiently(sock, chunk):
+    """Send all of `chunk`, waiting out macOS's "No buffer space available".
+
+    Loading the 134 MB model while the page fetches the trackers can fill the
+    loopback's buffers; macOS then refuses a send with ENOBUFS instead of
+    waiting, and the request died half sent. This sends on the socket itself
+    and counts what went, so a retry never sends a byte twice.
+    """
+    view = memoryview(chunk)
+    waited = 0
+    while view:
+        try:
+            sent = sock.send(view)
+            view = view[sent:]
+            waited = 0
+        except OSError as err:
+            if err.errno != 55 or waited > 400:          # ENOBUFS, for up to ~8 s
+                raise
+            waited += 1
+            time.sleep(0.02)
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -257,10 +328,10 @@ class Handler(BaseHTTPRequestHandler):
             f.seek(start)
             left = length
             while left > 0:
-                chunk = f.read(min(1 << 20, left))
+                chunk = f.read(min(1 << 18, left))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                write_patiently(self.connection, chunk)
                 left -= len(chunk)
 
     def under(self, base, rest):
@@ -323,6 +394,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "no such take file"}, 404)
             return self.send_file(os.path.join(folder, name))
 
+        if path == "/api/frame":
+            folder = take_dir((query.get("take") or [""])[0])
+            try:
+                fps = int((query.get("fps") or ["30"])[0])
+                n = int((query.get("n") or ["0"])[0])
+            except ValueError:
+                return self.send_json({"error": "bad frame"}, 400)
+            if not folder:
+                return self.send_json({"error": "no such take"}, 404)
+            return self.send_file(os.path.join(frames_dir(folder, fps), "%06d.jpg" % n))
+
         return self.send_json({"error": "unknown"}, 404)
 
     # -- POST --------------------------------------------------------------
@@ -354,6 +436,21 @@ class Handler(BaseHTTPRequestHandler):
             os.replace(os.path.join(folder, name + ".part"), os.path.join(folder, name))
             return self.send_json({"ok": True, "bytes": len(data),
                                    "path": os.path.join(folder, name)})
+
+        if path == "/api/frames":
+            body = self.read_json()
+            folder = take_dir(body.get("take", ""))
+            if not folder:
+                return self.send_json({"error": "no such take"}, 404)
+            return self.send_json(cut_frames(folder, int(body.get("fps", 30))))
+
+        if path == "/api/frames-clear":
+            folder = take_dir(self.read_json().get("take", ""))
+            if folder:
+                for name in os.listdir(folder):
+                    if name.startswith(".frames-"):
+                        shutil.rmtree(os.path.join(folder, name), ignore_errors=True)
+            return self.send_json({"ok": True})
 
         if path == "/api/fbx":
             folder = take_dir(self.read_json().get("take", ""))
