@@ -22,7 +22,9 @@
  */
 
 import * as THREE from 'three';
-import { BONES, FINGERS, FACE_SHAPES } from './mannequin.js';
+import { BONES, FINGERS, FACE_SHAPES, restPositions } from './mannequin.js';
+import { findJumps, travelAcross, scaleAtPerson } from './ground.js';
+import { fuse } from './fuse.js';
 
 export const P = {
   nose: 0, lEar: 7, rEar: 8, lSh: 11, rSh: 12, lEl: 13, rEl: 14, lWr: 15, rWr: 16,
@@ -174,6 +176,10 @@ export function prepare(capture, { smoothing = 0.5 } = {}) {
 
   const prep = (pick, maxGap, scale) =>
     smoothSeries(fillGaps(track(F, pick), maxGap), dt, fs, scale);
+  // The body as MediaPipe saw it, with DWPose's legs and feet folded in when
+  // the take was tracked on Best (fuse.js).
+  const poses = fuse(capture);
+  const pose = (n) => poses[n];
 
   return {
     fps: capture.fps,
@@ -181,9 +187,10 @@ export function prepare(capture, { smoothing = 0.5 } = {}) {
     height: capture.height,
     faceNames: capture.faceNames || [],
     n: F.length,
-    world: prep((f) => f.pose && f.pose.w, gap, 1),
-    img: prep((f) => f.pose && f.pose.i, gap, 1),
-    vis: fillGaps(track(F, (f) => f.pose && f.pose.v), gap),
+    poses,
+    world: smoothSeries(fillGaps(F.map((_, n) => (pose(n) ? Array.from(pose(n).w) : null)), gap), dt, fs, 1),
+    img: smoothSeries(fillGaps(F.map((_, n) => (pose(n) ? Array.from(pose(n).i) : null)), gap), dt, fs, 1),
+    vis: fillGaps(F.map((_, n) => (pose(n) ? Array.from(pose(n).v) : null)), gap),
     handL: prep((f) => f.hands && f.hands.L && f.hands.L.w, Math.round(gap / 2), 0.15),
     handR: prep((f) => f.hands && f.hands.R && f.hands.R.w, Math.round(gap / 2), 0.15),
     face: prep((f) => f.face, gap, 1),
@@ -369,22 +376,41 @@ export function faceWeights(face, names) {
 // 4: put it on the floor
 // --------------------------------------------------------------------------
 
-/** Where the lowest point of either foot is, with the hips at the origin. */
-export function lowestFoot(mannequin, q) {
+/** Where each sole and palm is, and the lowest point of the body that can
+ *  stand on the floor, with the hips at the origin (turned as they are). */
+export function feetOf(mannequin, q) {
   const { bones, root } = mannequin;
   BONE_NAMES.forEach((name, i) => bones[name].quaternion.set(q[i * 4], q[i * 4 + 1], q[i * 4 + 2], q[i * 4 + 3]));
   bones.Hips.position.set(0, 0, 0);
   root.updateMatrixWorld(true);
   let low = Infinity;
   const v = new THREE.Vector3();
+  const soles = {};
   for (const s of ['Left', 'Right']) {
     for (const [bone, offset] of [['Foot', [0, -0.07, -0.05]], ['Foot', [0, -0.07, 0.1]],
                                   ['ToeBase', [0, -0.02, 0.06]]]) {
       v.set(...offset).applyMatrix4(bones[s + bone].matrixWorld);
       low = Math.min(low, v.y);
     }
+    soles[s[0]] = new THREE.Vector3(0, -0.07, 0.03).applyMatrix4(bones[s + 'Foot'].matrixWorld);
+    // The palm, for when the hands are on the floor - a burpee, a crawl, a
+    // floor move. Nothing goes through the floor, hands included.
+    const palm = new THREE.Vector3(0.05 * (s === 'Left' ? 1 : -1), -0.018, 0)
+      .applyMatrix4(bones[s + 'Hand'].matrixWorld);
+    soles[s[0] + 'H'] = palm;
+    low = Math.min(low, palm.y);
   }
-  return low;
+  // Upright: the chest above the hips, and the feet under them - the only
+  // shape a body jumps from.
+  const neck = bones.Neck.getWorldPosition(new THREE.Vector3());
+  const feetMid = soles.L.clone().add(soles.R).multiplyScalar(0.5);
+  const upright = neck.angleTo(Y) < THREE.MathUtils.degToRad(45) && Math.hypot(feetMid.x, feetMid.z) < 0.45;
+  return { low, soles, upright };
+}
+
+/** Where the lowest point of either foot is, with the hips at the origin. */
+export function lowestFoot(mannequin, q) {
+  return feetOf(mannequin, q).low;
 }
 
 function median(xs) {
@@ -436,38 +462,25 @@ function calibrate(S) {
   return { level, headPitch };
 }
 
+// The mannequin's own measurements, to turn the person's size in the
+// picture into metres: hips to shoulders, and hip to ankle.
+const REST = restPositions();
+const TORSO_M = REST.LeftArm.clone().add(REST.RightArm).multiplyScalar(0.5)
+  .distanceTo(REST.LeftUpLeg.clone().add(REST.RightUpLeg).multiplyScalar(0.5));
+const LEG_M = REST.LeftUpLeg.distanceTo(REST.LeftFoot);
+
 /**
- * The whole take, solved. `root` is 'video' (travel as the person travelled
- * across the picture) or 'place' (stay on the spot; jumps are kept).
+ * The whole take, solved. `root` is 'follow' (move across the floor as the
+ * person did) or 'place' (stay on the spot; jumps are kept either way).
  */
-export function solve(capture, mannequin, { smoothing = 0.5, root = 'video', hands = true, face = true } = {}) {
+export function solve(capture, mannequin, { smoothing = 0.5, root = 'follow', hands = true, face = true } = {}) {
   const S = prepare(capture, { smoothing });
   const cal = calibrate(S);
   const W = S.width, H = S.height;
-  const legLen = OFFSET.LeftLeg.length() + OFFSET.LeftFoot.length();
 
-  // How many mannequin metres one pixel is, from the length of the person's
-  // legs in the picture. The median, so a crouch does not change it.
-  const pixelLegs = [];
-  const footPx = new Array(S.n).fill(NaN);
-  const hipPx = new Array(S.n).fill(null);
-  const legsSeen = new Array(S.n).fill(false);
-  for (let i = 0; i < S.n; i++) {
-    const im = S.img[i], v = S.vis[i];
-    if (!im) continue;
-    const px = (k) => new THREE.Vector2(im[k * 2] * W, im[k * 2 + 1] * H);
-    hipPx[i] = px(P.lHip).add(px(P.rHip)).multiplyScalar(0.5);
-    legsSeen[i] = legSeen(v, im, true) && legSeen(v, im, false);
-    if (legsSeen[i]) {
-      pixelLegs.push((px(P.lHip).distanceTo(px(P.lAnk)) + px(P.rHip).distanceTo(px(P.rAnk))) / 2);
-      footPx[i] = Math.max(...[P.lHeel, P.rHeel, P.lToe, P.rToe].map((k) => im[k * 2 + 1] * H));
-    }
-  }
-  const metresPerPx = legLen / (median(pixelLegs) || H * 0.45);
-  const startHip = hipPx.find(Boolean) || new THREE.Vector2(W / 2, H / 2);
-  const window = Math.round(S.fps);
-
+  // Pass 1: every frame's pose, and where its feet are.
   const frames = [];
+  const soles = [], lows = [], upright = [];
   let found = 0, handsFound = 0, faceFound = 0;
   for (let i = 0; i < S.n; i++) {
     const w = S.world[i];
@@ -475,40 +488,76 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'video', han
     const hl = hands ? S.handL[i] : null, hr = hands ? S.handR[i] : null;
     if (hl || hr) handsFound++;
     if (S.face[i]) faceFound++;
-
-    const q = w ? toLocal(aimFrame(w, S.vis[i], hl, hr, { ...cal, img: S.img[i] })) : (frames.length ? frames[frames.length - 1].q : toLocal({}));
-
-    // On the floor: the lower foot touches it.
-    const restHips = OFFSET.Hips.y;
-    let y = restHips;
-    if (legsSeen[i]) {
-      y = -lowestFoot(mannequin, q);
-      // A jump: both feet above where the floor was in the picture over the
-      // second around this frame. A few centimetres are ignored, because the
-      // tracker's feet wobble by that much standing still.
-      let ground = -Infinity;
-      for (let k = Math.max(0, i - window); k <= Math.min(S.n - 1, i + window); k++) {
-        if (Number.isFinite(footPx[k])) ground = Math.max(ground, footPx[k]);
-      }
-      const lift = (ground - footPx[i]) * metresPerPx;
-      if (lift > 0.04) y += lift - 0.04;
-    }
-    let x = 0;
-    if (root === 'video' && hipPx[i]) x = (hipPx[i].x - startHip.x) * metresPerPx;
-
-    frames.push({
-      q,
-      hips: [x, y, 0],
-      m: face ? faceWeights(S.face[i], S.faceNames) : new Float32Array(FACE_SHAPES.length),
-    });
+    const q = w ? toLocal(aimFrame(w, S.vis[i], hl, hr, { ...cal, img: S.img[i] }))
+      : (frames.length ? frames[frames.length - 1].q : toLocal({}));
+    const feet = feetOf(mannequin, q);
+    soles.push(feet.soles);
+    lows.push(feet.low);
+    upright.push(feet.upright);
+    frames.push({ q, m: face ? faceWeights(S.face[i], S.faceNames) : new Float32Array(FACE_SHAPES.length) });
   }
   mannequin.reset();
+
+  // Pass 2: the person's feet and size in the picture, and the floor's movement.
+  const footPx = new Array(S.n).fill(NaN);
+  const torsoPx = new Array(S.n).fill(NaN);
+  const legPx = new Array(S.n).fill(NaN);
+  const legsSeen = new Array(S.n).fill(false);
+  const hipPx = new Array(S.n).fill(NaN);
+  const floorDy = capture.frames.map((f) => (f.floor ? f.floor.dy * H : NaN));
+  const floorDx = capture.frames.map((f) => (f.floor ? f.floor.dx * W : NaN));
+  const hipX = new Array(S.n).fill(NaN);
+  for (let i = 0; i < S.n; i++) {
+    const im = S.img[i], v = S.vis[i];
+    if (!im) continue;
+    const px = (k) => new THREE.Vector2(im[k * 2] * W, im[k * 2 + 1] * H);
+    const hipMid = px(P.lHip).add(px(P.rHip)).multiplyScalar(0.5);
+    if (isSeen(v, im, P.lHip, 0.5) && isSeen(v, im, P.rHip, 0.5)) {
+      torsoPx[i] = px(P.lSh).add(px(P.rSh)).multiplyScalar(0.5).distanceTo(hipMid);
+      hipPx[i] = hipMid.y;
+      hipX[i] = hipMid.x;
+    }
+    legsSeen[i] = legSeen(v, im, true) && legSeen(v, im, false);
+    if (legsSeen[i]) {
+      legPx[i] = Math.max(px(P.lHip).distanceTo(px(P.lAnk)), px(P.rHip).distanceTo(px(P.rAnk)));
+      footPx[i] = Math.max(...[P.lHeel, P.rHeel, P.lToe, P.rToe].map((k) => im[k * 2 + 1] * H));
+    }
+  }
+  const pxPerM = scaleAtPerson(torsoPx, legPx, TORSO_M, LEG_M, S.fps);
+  const ground = findJumps(footPx, pxPerM, floorDy, S.fps, hipPx, upright);
+
+  // Pass 3: the hips over the floor.
+  const across = root === 'follow' ? travelAcross(hipX, pxPerM, floorDx, W) : null;
+  const restHips = OFFSET.Hips.y;
+  let takeoff = restHips;
+  frames.forEach((f, i) => {
+    // On the floor, the lowest point touches it. In the air, the hips are as
+    // far above where they took off from as the picture says they rose -
+    // never so low that a foot goes through the floor.
+    const grounded = legsSeen[i] ? -lows[i] : restHips;
+    if (ground.air[i] && !(i > 0 && ground.air[i - 1])) takeoff = i > 0 && legsSeen[i - 1] ? -lows[i - 1] : grounded;
+    const y = ground.air[i] ? Math.max(grounded, takeoff + ground.lift[i]) : grounded;
+    f.hips = [across ? across[i] : 0, y, 0];
+    f.air = ground.air[i];
+    f.lift = ground.lift[i];
+    // Drawn over the video: under the feet while they are on it, and where it
+    // was left while the person is in the air.
+    const under = ground.air[i] ? ground.floorPx[i] : footPx[i];
+    f.floor = Number.isFinite(under) ? under / H : null;
+  });
+
+  const scanned = capture.frames.filter((f) => f.floor).length;
+  const moving = capture.frames.filter((f) => f.floor && Math.hypot(f.floor.dx, f.floor.dy) > 0.002).length;
 
   return {
     fps: S.fps,
     frames,
     faceNames: S.faceNames,
     faceAll: face ? S.face : S.face.map(() => null),
+    jumps: ground.jumps,
+    poses: S.poses,
+    refined: capture.frames.some((f) => f.dw),
+    rejectedJumps: ground.rejected,
     calibration: { level: cal.level ? THREE.MathUtils.radToDeg(2 * Math.acos(Math.min(1, Math.abs(cal.level.w)))) : 0,
       headPitch: THREE.MathUtils.radToDeg(cal.headPitch) },
     stats: {
@@ -517,6 +566,11 @@ export function solve(capture, mannequin, { smoothing = 0.5, root = 'video', han
       hands: S.n ? handsFound / S.n : 0,
       face: S.n ? faceFound / S.n : 0,
       legs: S.n ? legsSeen.filter(Boolean).length / S.n : 0,
+      jumps: ground.jumps.length,
+      // How much of the take the floor could be read in, and how much of it
+      // the camera was moving. A take tracked before the floor scan has none.
+      floorScanned: (capture.version || 1) >= 2 ? scanned / Math.max(1, S.n) : null,
+      cameraMoving: scanned ? moving / scanned : 0,
     },
   };
 }

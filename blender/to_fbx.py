@@ -11,8 +11,10 @@ Job:  {"source": ".../cermin.glb", "target": ".../cermin.fbx", "fps": 30}
 import json
 import os
 import sys
+import tempfile
 
 import bpy
+from fbx_materials import prepare as prepare_material
 from workshop import fresh_scene                   # noqa: E402  bengkel common/blender
 
 ANSWER = "@@JOB@@"
@@ -36,8 +38,8 @@ def main():
         return
     # This import's own animation only: bpy.data.actions is the whole shared
     # Blender, and boneka's or Claude's actions are not this take's length.
-    mine = [a.animation_data.action for a in armatures
-            if a.animation_data and a.animation_data.action]
+    mine = [o.animation_data.action for o in scene.objects
+            if o.animation_data and o.animation_data.action]
     actions = [a.name for a in mine]
     ranges = [a.frame_range for a in mine]
     if ranges:
@@ -50,16 +52,45 @@ def main():
     bpy.ops.object.select_all(action="DESELECT")
     for obj in bpy.context.scene.objects:
         obj.select_set(True)
-    bpy.ops.export_scene.fbx(
-        filepath=job["target"],
-        use_selection=True,
-        add_leaf_bones=False,
-        bake_anim=True,
-        bake_anim_use_all_actions=False,
-        bake_anim_use_nla_strips=False,
-        bake_anim_simplify_factor=0.0,
-        object_types={"ARMATURE", "MESH"},
-    )
+    # glTF images arrive packed in memory. FBX embeds files from disk, so give
+    # this scene's images temporary paths and embed them before cleaning up.
+    materials = {m for o in scene.objects if o.type == "MESH" for m in o.data.materials if m}
+    for material in materials:
+        prepare_material(material)
+    images = set()
+    for obj in scene.objects:
+        if obj.type != "MESH":
+            continue
+        for material in obj.data.materials:
+            if material and material.use_nodes:
+                images.update(n.image for n in material.node_tree.nodes
+                              if n.type == "TEX_IMAGE" and n.image)
+    with tempfile.TemporaryDirectory(prefix="cermin-fbx-textures-") as folder:
+        for index, image in enumerate(images):
+            extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get(image.file_format, "png")
+            path = os.path.join(folder, "texture_%d.%s" % (index, extension))
+            if image.packed_file:
+                with open(path, "wb") as file:
+                    file.write(image.packed_file.data)
+            else:
+                image.filepath_raw = path
+                image.save()
+            image.filepath = path
+        bpy.ops.export_scene.fbx(
+            filepath=job["target"],
+            use_selection=True,
+            add_leaf_bones=False,
+            bake_anim=True,
+            bake_anim_use_all_actions=False,
+            bake_anim_use_nla_strips=False,
+            bake_anim_simplify_factor=0.0,
+            # CharacterMotion is an animated parent; keeping empties retains
+            # its root translation and the source model's uniform scale.
+            object_types={"ARMATURE", "MESH", "EMPTY"},
+            path_mode="COPY",
+            embed_textures=True,
+            use_custom_props=True,  # retain source, artist, license and adaptations
+        )
 
     # Assert on the file, not on the operator having returned.
     size = os.path.getsize(job["target"]) if os.path.exists(job["target"]) else 0

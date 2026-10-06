@@ -146,3 +146,23 @@
   border: 3px dashed var(--tool);
   font-size: 1.15rem;
 }
+
+/* Character choice remains available before capture and during playback. */
+.character-picker {
+  position: absolute; top: 12px; left: 14px; right: 14px; z-index: 3;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  color: var(--ink-dim); font-size: .9rem;
+}
+.character-picker select {
+  font: inherit; color: var(--ink); background: var(--bg-panel);
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 8px 28px 8px 10px; min-height: 38px; cursor: pointer;
+}
+.character-picker select:focus-visible { outline: 2px solid var(--tool); outline-offset: 2px; }
+#character-status { width: 100%; font-size: .8rem; color: var(--ink-faint); }
+
+#stage-pane .viewport-tools { top: auto; bottom: 16px; left: 14px; }
+
+#character-credit, #character-capabilities { width: 100%; font-size: .72rem; line-height: 1.4; color: var(--ink-faint); }
+#character-credit:hover { color: var(--tool); }
+#character-status:empty { display: none; }

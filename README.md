@@ -33,13 +33,20 @@ so a take never leaves the Mac.
 Every take lives in `~/Documents/bengkel/cermin/takes/<date>-<name>/` with its
 video, its raw capture and whatever was exported from it.
 
-## The mannequin
+## Character choices
 
-One standard humanoid, 65 bones, Mixamo names (`Hips`, `Spine`, `LeftArm`,
-`LeftHandIndex1`…) so Blender, Unreal's IK Retargeter and gerak recognise it.
-T-pose, facing +Z, 1.79 m. Its face has 22 ARKit shape keys - blinks, brows,
-jaw, smile, pucker - and the full 51 are in the `.csv` for a character that
-has them all.
+The dropdown offers a wooden mannequin, a human skeleton, a clothed stylized man
+and a clothed stylized woman. These are downloaded, artist-made models: see
+[model credits and licenses](web/characters/README.md).
+
+Cermin solves movement on its internal 65-bone Mixamo-named rig, then retargets it
+onto the selected model's original skeleton. GLB and FBX contain that character,
+its textures and animation; BVH contains the canonical motion skeleton.
+Selection is remembered and switching keeps the current take and pose.
+
+Facial expressions are captured in `face.csv` (51 ARKit values), but these models
+have no compatible expression shapes. The wooden mannequin has solid hands;
+the skeleton and both people have articulated fingers.
 
 ## Getting good captures
 
@@ -57,8 +64,9 @@ has them all.
 
 ```bash
 npm install          # once: playwright-core, for driving Chrome
-npm test             # 35 checks: upload, solve, export, reopen, record, close-up
+npm test             # capture checks: upload, solve, export, reopen, record, close-up
 node tests/smoke.mjs --fbx   # also make the .fbx through Blender MCP
+node tests/characters.mjs   # all four rigs, textures, switches and GLB motion
 ```
 
 The record test uses Chrome's fake camera, fed a video, so it runs without a

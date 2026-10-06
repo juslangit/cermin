@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Tests for cermin. The tool itself needs nothing installed.",
   "scripts": {
-    "test": "node tests/smoke.mjs"
+    "test": "node tests/smoke.mjs",
+    "test:characters": "node tests/characters.mjs"
   },
   "devDependencies": {
     "playwright-core": "^1.63.0"

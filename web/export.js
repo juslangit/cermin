@@ -1,6 +1,6 @@
 /* Getting a take out of cermin.
  *
- *   .glb  the mannequin and its animation, for Godot, three.js, gerak, Blender
+ *   .glb  the selected character and its animation, for Godot, three.js, gerak, Blender
  *   .bvh  the skeleton and its motion, the plain-text format every animation
  *         package has read since the nineties - no mesh, no face
  *   .csv  all 51 face values per frame (ARKit's 52 less tongueOut), named the ARKit way, to drive a real
@@ -15,6 +15,8 @@ import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/GLTFExporter.js';
 import { BONES, FACE_SHAPES } from './mannequin.js';
 import { BONE_NAMES } from './solve.js';
+import { retargetClip } from './characters.js';
+import { clone as cloneSkinned } from 'three/addons/SkeletonUtils.js';
 
 /** The solved take as a three.js animation clip. */
 export function buildClip(solved, name = 'cermin') {
@@ -53,13 +55,21 @@ export function buildClip(solved, name = 'cermin') {
   return new THREE.AnimationClip(name, n / solved.fps, tracks);
 }
 
-/** The mannequin in its T-pose, with the take as its one animation. */
+/** The selected character in its calibrated T-pose, with the retargeted take. */
 export async function toGLB(mannequin, clip) {
-  mannequin.reset();
-  const exporter = new GLTFExporter();
-  return exporter.parseAsync(mannequin.root, {
-    binary: true, animations: [clip], onlyVisible: true,
-  });
+  if (!mannequin.avatar) throw new Error('Load a character before exporting.');
+  const avatar = mannequin.avatar;
+  const animation = retargetClip(mannequin, clip);
+  avatar.reset();
+  // Texture encoding is asynchronous. Export a frozen rig so the live render
+  // loop cannot change its transforms while GLTFExporter is writing it.
+  const snapshot = cloneSkinned(avatar.root);
+  avatar.sync(mannequin);
+  try {
+    return await new GLTFExporter().parseAsync(snapshot, {
+      binary: true, animations: [animation], onlyVisible: true,
+    });
+  } finally { avatar.sync(mannequin); }
 }
 
 /** The skeleton and its motion as a .bvh, in centimetres. */

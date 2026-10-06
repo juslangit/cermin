@@ -60,7 +60,18 @@
     </div>
 
     <div class="pane" id="stage-pane">
-      <div class="pane-label">Mannequin</div>
+      <div class="character-picker">
+        <label for="character">Character</label>
+        <select id="character">
+          <option value="mannequin">Mannequin</option>
+          <option value="skeleton">Skeleton</option>
+          <option value="male">Male character</option>
+          <option value="female">Female character</option>
+        </select>
+        <span id="character-status" role="status" aria-live="polite"></span>
+        <a id="character-credit" target="_blank" rel="noopener"></a>
+        <span id="character-capabilities"></span>
+      </div>
       <div class="viewport" id="viewport"></div>
       <div class="viewport-tools">
         <div class="seg" id="view">
@@ -92,10 +103,14 @@
       <div class="field">
         <span>Tracking</span>
         <div class="seg" id="opt-quality">
-          <button class="seg-btn is-on" data-v="accurate">Accurate</button>
+          <button class="seg-btn is-on" data-v="best" id="q-best">Best</button>
+          <button class="seg-btn" data-v="accurate">Accurate</button>
           <button class="seg-btn" data-v="fast">Fast</button>
         </div>
       </div>
+      <p class="hint" id="q-hint">Best looks at every frame twice — the second
+      time with a much larger model that places legs and feet far better under
+      loose clothes. About three times slower.</p>
       <div class="field">
         <span>Frames per second</span>
         <div class="seg" id="opt-fps">
@@ -116,23 +131,30 @@
       <div class="field">
         <span>Moving around</span>
         <div class="seg" id="opt-root">
-          <button class="seg-btn is-on" data-v="video">Follow the video</button>
+          <button class="seg-btn is-on" data-v="follow">Follow the person</button>
           <button class="seg-btn" data-v="place">Stay in place</button>
         </div>
       </div>
+      <p class="hint">The feet always stay on the floor, and the body only leaves
+      it for a real jump. The floor is scanned while tracking, so a camera that
+      moves or turns does not lift or carry the mannequin.</p>
       <p class="hint">Changes here re-solve the take straight away — the video
       is not tracked again.</p>
     </div>
 
     <div class="panel-title">Found</div>
     <dl class="facts" id="facts"><dt>Nothing yet</dt><dd></dd></dl>
+    <div class="group">
+      <button class="btn btn-wide btn-quiet" id="retrack" disabled>Track this video again</button>
+    </div>
 
     <div class="panel-title">Export</div>
     <div class="group export">
-      <button class="btn btn-wide" data-export="glb" disabled>.glb <small>mannequin + animation</small></button>
+      <button class="btn btn-wide" data-export="glb" disabled>.glb <small>character + animation</small></button>
       <button class="btn btn-wide" data-export="fbx" disabled>.fbx <small>through Blender</small></button>
       <button class="btn btn-wide" data-export="bvh" disabled>.bvh <small>skeleton only</small></button>
       <button class="btn btn-wide" data-export="csv" disabled>.csv <small>51 face values</small></button>
+      <button class="btn btn-wide btn-primary" id="to-gerak" hidden disabled>Send to gerak <small>clean it up by hand</small></button>
       <button class="btn btn-wide btn-quiet" id="reveal" disabled>Show the take in Finder</button>
     </div>
   </aside>

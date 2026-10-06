@@ -200,6 +200,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- replies -----------------------------------------------------------
 
+    def end_headers(self):
+        # Cross-origin isolated, so the refining model may use several threads
+        # (SharedArrayBuffer). Everything the page loads is its own, so nothing
+        # is lost by it.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        super().end_headers()
+
     def send_bytes(self, body, ctype, status=200):
         self.send_response(status)
         self.send_header("Content-Type", ctype)

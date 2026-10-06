@@ -17,7 +17,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { api, say, working } from '/common/tool.js';
 import { buildMannequin } from './mannequin.js';
+import { CHARACTERS, loadCharacter } from './characters.js';
 import { trackers, trackVideo, detect, drawOverlay } from './track.js';
+import { Refiner, available as refinerAvailable } from './refine.js';
 import { solve, LiveSolver, lowestFoot, legSeen, BONE_NAMES } from './solve.js';
 import { buildClip, toGLB, toBVH, toFaceCSV } from './export.js';
 
@@ -31,6 +33,7 @@ const state = {
   trackers: null, trackersKey: '', live: null,
   capture: null, solved: null, clip: null, action: null,
   take: null, mode: 'empty', busy: false, cancel: false,
+  character: 'mannequin', characterLoading: false,
 };
 
 // --------------------------------------------------------------------------
@@ -108,7 +111,44 @@ scene.add(grid);
 
 const man = buildMannequin();
 scene.add(man.root);
+man.root.visible = false;
 const mixer = new THREE.AnimationMixer(man.root);
+
+let characterRequest = 0;
+async function changeCharacter(name) {
+  const request = ++characterRequest;
+  state.characterLoading = true;
+  $('character-status').textContent = 'Loading character…';
+  try {
+    const avatar = await loadCharacter(name);
+    if (request !== characterRequest) { avatar.dispose(); return; }
+    const previous = man.avatar;
+    man.avatar = avatar;
+    scene.add(avatar.root);
+    avatar.sync(man);
+    if (previous) { scene.remove(previous.root); previous.dispose(); }
+    const credit = $('character-credit');
+    credit.href = avatar.root.userData.source;
+    credit.textContent = `${avatar.info.title} · ${avatar.info.author} · CC BY`;
+    $('character-capabilities').textContent = avatar.info.fingers
+      ? 'Body + fingers. Face motion is saved as CSV; this model has no expression shapes.'
+      : 'Body + wrists. Finger and face motion are saved; this wooden model has no finger or expression rig.';
+    state.character = name;
+    $('character').value = name;
+    try { localStorage.setItem('cermin.character', name); } catch (_) { /* optional preference */ }
+  } catch (error) {
+    if (request !== characterRequest) return;
+    $('character').value = state.character;
+    say(error.message, true);
+  } finally {
+    if (request === characterRequest) {
+      state.characterLoading = false;
+      $('character-status').textContent = '';
+    }
+  }
+}
+$('character').addEventListener('change', () => changeCharacter($('character').value));
+
 
 const VIEWS = {
   front: [0, 1.15, 4.6], side: [4.6, 1.15, 0], three: [3.2, 1.6, 3.4],
@@ -127,6 +167,9 @@ function resize() {
   renderer.domElement.style.width = w + 'px';
   renderer.domElement.style.height = h + 'px';
   camera.aspect = w / Math.max(1, h);
+  // Keep both outstretched hands in the narrow half-width stage.
+  camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.max(
+    Math.tan(THREE.MathUtils.degToRad(35 / 2)), 1.04 / (4.6 * camera.aspect))));
   camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(viewport);
@@ -158,12 +201,20 @@ function tick() {
   if (state.mode === 'take' && state.action) {
     mixer.setTime(Math.min(video.currentTime, state.clip.duration - 1e-4));
     frameFollow();
-    const f = state.capture.frames[frameIndex()];
-    if (!state.busy) drawOverlay(octx, f, overlay.width, overlay.height);
+    const i = frameIndex();
+    const sf = state.solved.frames[i];
+    if (!state.busy) {
+      // The points the mannequin was solved from - refined, when they were.
+      const raw = state.capture.frames[i];
+      const shown = raw && state.solved.poses[i] ? { ...raw, pose: state.solved.poses[i] } : raw;
+      drawOverlay(octx, shown, overlay.width, overlay.height, undefined,
+        sf && { floor: sf.floor, air: sf.air });
+    }
     updateTime();
   } else if (state.mode === 'live') {
     liveStep();
   }
+  if (man.avatar) man.avatar.sync(man);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -192,7 +243,7 @@ function togglePlay() {
 $('play').addEventListener('click', togglePlay);
 video.loop = true;
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea')) return;
+  if (e.target.closest('input, textarea, select, button')) return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
 });
 
@@ -223,7 +274,7 @@ async function fileTrackers() {
   if (state.trackers && state.trackersKey === key) return state.trackers;
   working(true, 'Getting the trackers ready', 'The first time takes a few seconds — the models load from this Mac, nothing is downloaded.');
   state.trackers = await trackers({
-    accurate: opt.quality() === 'accurate', hands: $('opt-hands').checked, face: $('opt-face').checked,
+    accurate: opt.quality() !== 'fast', hands: $('opt-hands').checked, face: $('opt-face').checked,
   });
   state.trackersKey = key;
   return state.trackers;
@@ -262,21 +313,8 @@ async function captureVideo(blob, label, ext) {
     // The video goes to disk while the trackers work.
     const saving = putFile(take, `video.${ext}`, blob);
 
-    const T = await fileTrackers();
-    const started = performance.now();
     const fps = Number(opt.fps());
-    const capture = await trackVideo(T, video, {
-      fps,
-      cancelled: () => state.cancel,
-      onProgress: (done, total, frame) => {
-        drawOverlay(octx, frame, overlay.width, overlay.height);
-        const per = (performance.now() - started) / done;
-        const left = Math.max(0, Math.round(((total - done) * per) / 1000));
-        working(true, `Following the person — frame ${done} of ${total}`,
-          frame.pose ? `About ${left}s left` : `No one found in this frame · about ${left}s left`);
-        $('bar').style.width = `${(100 * done) / total}%`;
-      },
-    });
+    const capture = await track(fps);
     capture.source = label;
     capture.video = `video.${ext}`;
 
@@ -309,6 +347,71 @@ async function captureVideo(blob, label, ext) {
     else { video.removeAttribute('src'); video.load(); setMode('empty'); }
   }
 }
+
+/** The DWPose refiner, loaded the first time Best is used. */
+async function bestRefiner() {
+  if (opt.quality() !== 'best') return null;
+  if (!state.refiner) {
+    working(true, 'Loading the larger model', 'Once per session — 134 MB, from this Mac.');
+    state.refiner = await Refiner.load();
+  }
+  return state.refiner;
+}
+
+/** Track whatever video is loaded, showing how far along it is. */
+async function track(fps) {
+  const T = await fileTrackers();
+  const refiner = await bestRefiner();
+  const started = performance.now();
+  return trackVideo(T, video, {
+    fps,
+    refiner,
+    cancelled: () => state.cancel,
+    onProgress: (done, total, frame) => {
+      drawOverlay(octx, frame, overlay.width, overlay.height);
+      const per = (performance.now() - started) / done;
+      const left = Math.max(0, Math.round(((total - done) * per) / 1000));
+      working(true, `${refiner ? 'Looking twice at every frame' : 'Following the person and scanning the floor'} — frame ${done} of ${total}`,
+        frame.pose ? `About ${left}s left` : `No one found in this frame · about ${left}s left`);
+      $('bar').style.width = `${(100 * done) / total}%`;
+    },
+  });
+}
+
+/* Track the open take's own video again - with whatever the Capture settings
+ * are now, and with the floor scan, which takes from before it lack. */
+async function retrack() {
+  if (state.busy || !state.take || !state.capture) return;
+  const take = state.take, old = state.capture;
+  state.busy = true;
+  state.cancel = false;
+  showWorking(true);
+  try {
+    video.pause();
+    const capture = await track(Number(opt.fps()));
+    capture.source = old.source;
+    capture.video = old.video;
+    working(true, 'Saving the take', '');
+    await putFile(take, 'capture.json', JSON.stringify(capture));
+    state.capture = capture;
+    resolve();
+    await putFile(take, 'take.json', JSON.stringify({
+      label: old.source || take, video: capture.video, duration: capture.duration, fps: capture.fps,
+      frames: capture.frames.length, stats: state.solved.stats, created: new Date().toISOString(),
+    }));
+    await listTakes();
+    video.currentTime = 0;
+    video.play();
+    say('Tracked again, with the floor scanned.');
+  } catch (err) {
+    say(err.message === 'cancelled' ? 'Stopped. The take is as it was.' : (err.message || String(err)), err.message !== 'cancelled');
+    state.capture = old;
+  } finally {
+    state.busy = false;
+    showWorking(false);
+  }
+}
+$('retrack').addEventListener('click', retrack);
 
 function showWorking(on) {
   working(on, on ? 'Starting' : '', '');
@@ -349,7 +452,11 @@ function showFacts(s, c) {
     <dt>Person found</dt>${pct(s.person)}
     <dt>Legs in picture</dt>${pct(s.legs)}
     <dt>Hands found</dt>${$('opt-hands').checked ? pct(s.hands) : '<dd>off</dd>'}
-    <dt>Face found</dt>${$('opt-face').checked ? pct(s.face) : '<dd>off</dd>'}`;
+    <dt>Face found</dt>${$('opt-face').checked ? pct(s.face) : '<dd>off</dd>'}
+    <dt>Jumps</dt><dd>${s.jumps}</dd>
+    <dt>Camera</dt>${s.floorScanned === null ? '<dd class="low">floor not scanned</dd>'
+      : s.floorScanned < 0.3 ? '<dd>floor too plain to read</dd>'
+        : `<dd>${s.cameraMoving > 0.15 ? 'moving' : 'still'}</dd>`}`;
 }
 
 function setMode(mode) {
@@ -357,6 +464,8 @@ function setMode(mode) {
   const ready = mode === 'take';
   document.querySelectorAll('[data-export]').forEach((b) => { b.disabled = !ready; });
   $('reveal').disabled = !ready;
+  $('to-gerak').disabled = !ready;
+  $('retrack').disabled = !ready;
   $('scrub').disabled = !ready;
   document.body.classList.toggle('is-live', mode === 'live');
   if (mode === 'empty') {
@@ -582,6 +691,10 @@ async function openTake(name) {
     state.take = name;
     state.capture = capture;
     resolve();
+    // A take from before the floor scan says so, and offers the way to get one.
+    if (state.solved.stats.floorScanned === null) {
+      say('This take was tracked before cermin scanned the floor. Press "Track this video again" to scan it as well.');
+    }
     document.querySelectorAll('.take').forEach((r) => r.classList.remove('is-on'));
     listTakes();
   } catch (err) {
@@ -597,6 +710,7 @@ async function openTake(name) {
 
 async function exportAs(kind) {
   if (!state.solved || !state.take) return;
+  if (state.characterLoading) { say('Wait for the character to finish loading, then export.'); return; }
   const take = state.take;
   try {
     if (kind === 'glb' || kind === 'fbx') {
@@ -628,8 +742,50 @@ document.querySelectorAll('[data-export]').forEach((b) =>
   b.addEventListener('click', () => exportAs(b.dataset.export)));
 $('reveal').addEventListener('click', () => state.take && api('/api/reveal', { take: state.take }));
 
+/* ── next door, inside bengkel ───────────────────────────────────────
+ *
+ * A take goes to gerak as a .glb - the same file the .glb button writes -
+ * because gerak opens files, not other tools' viewports. There every bone's
+ * keys are on the timeline, ready to be cleaned up by hand. Behind a check
+ * for bengkel, so cermin on its own is unchanged.
+ */
+if (window.bengkel) {
+  const send = $('to-gerak');
+  send.hidden = false;
+  send.addEventListener('click', async () => {
+    if (!state.solved || !state.take) return;
+    if (state.characterLoading) { say('Wait for the character to finish loading, then send it.'); return; }
+    send.disabled = true;
+    try {
+      working(true, 'Writing the .glb for gerak', '');
+      const saved = await putFile(state.take, 'cermin.glb', await toGLB(man, state.clip));
+      const label = (state.capture && state.capture.source) || state.take;
+      await window.bengkel.handOver('gerak', saved.path, label);
+      listTakes();
+    } catch (err) {
+      say(err.message || String(err), true);
+    } finally {
+      working(false);
+      send.disabled = state.mode !== 'take';
+    }
+  });
+}
+
 // --------------------------------------------------------------------------
 
-window.cermin = { state, man, solve, captureVideo, openTake, exportAs, renderer, setView };
+// Best needs the 134 MB model, which a fresh copy fetches with
+// tools/fetch-models.sh. Without it, Best is offered as unavailable.
+refinerAvailable().then((ok) => {
+  if (ok) return;
+  $('q-best').disabled = true;
+  $('q-best').classList.remove('is-on');
+  document.querySelector('#opt-quality [data-v="accurate"]').classList.add('is-on');
+  $('q-hint').textContent = 'Best needs its larger model: run tools/fetch-models.sh once, then reload.';
+});
+
+window.cermin = { state, man, solve, captureVideo, openTake, exportAs, renderer, setView, changeCharacter };
 listTakes().catch(() => {});
+let savedCharacter;
+try { savedCharacter = localStorage.getItem('cermin.character'); } catch (_) { /* optional preference */ }
+changeCharacter(CHARACTERS.includes(savedCharacter) ? savedCharacter : 'mannequin');
 tick();

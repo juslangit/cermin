@@ -7,3 +7,5 @@ scratch/
 docs/index.html
 tests/media/jumping.webm
 tests/media/signs.webm
+tuck.webm
+web/models/dwpose.onnx

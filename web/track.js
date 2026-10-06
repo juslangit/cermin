@@ -9,13 +9,15 @@
  * drops frames whenever the trackers fall behind, and a capture with holes in
  * it is worse than one that took longer.
  *
- * What comes out is the raw capture - the points as seen, before smoothing -
- * which is what gets saved. Smoothing and solving happen afterwards, in
- * solve.js, so that changing them never means tracking the video again.
+ * What comes out is the raw capture - the points as seen, before smoothing,
+ * and how the floor near the feet moved (floor.js) - which is what gets
+ * saved. Smoothing and solving happen afterwards, in solve.js, so that
+ * changing them never means tracking the video again.
  */
 
 import { FilesetResolver, PoseLandmarker, HandLandmarker, FaceLandmarker }
   from './vendor/mediapipe/vision_bundle.mjs';
+import { FloorScan } from './floor.js';
 
 const WASM = '/web/vendor/mediapipe/wasm';
 const MODELS = {
@@ -144,7 +146,7 @@ export async function settleDuration(video) {
  * Track a whole video, one frame at a time.
  * onProgress(done, total, frame) is called after every frame.
  */
-export async function trackVideo(T, video, { fps = 30, onProgress, cancelled } = {}) {
+export async function trackVideo(T, video, { fps = 30, onProgress, cancelled, refiner = null } = {}) {
   const duration = await settleDuration(video);
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('That video has no length the browser can read.');
   video.pause();
@@ -152,6 +154,7 @@ export async function trackVideo(T, video, { fps = 30, onProgress, cancelled } =
   T.clock += 10000;                                   // a new video: no memory of the last
   const start = T.clock;
   const frames = [];
+  const floor = new FloorScan(video);
   for (let n = 0; n < total; n++) {
     if (cancelled && cancelled()) throw new Error('cancelled');
     const t = Math.min(duration - 0.001, n / fps + 0.0005);
@@ -159,12 +162,15 @@ export async function trackVideo(T, video, { fps = 30, onProgress, cancelled } =
     await once(video, 'seeked');
     const frame = detect(T, video, start + (n * 1000) / fps);
     frame.t = r4(t);
+    frame.floor = floor.step(video, frame.pose);
+    // The second, closer look (refine.js): DWPose's points for legs and feet.
+    if (refiner && frame.pose) frame.dw = await refiner.run(video, frame.pose);
     frames.push(frame);
     if (onProgress) onProgress(n + 1, total, frame);
     if (n % 4 === 3) await new Promise((r) => setTimeout(r, 0));   // let the page draw
   }
   return {
-    version: 1,
+    version: 3,                 // 2: the floor's movement; 3: DWPose's points, when refined
     fps,
     width: video.videoWidth,
     height: video.videoHeight,
@@ -185,9 +191,10 @@ const HAND_LINES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 
   [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17],
   [17, 18], [18, 19], [19, 20]];
 
-export function drawOverlay(ctx, frame, w, h, accent = '#f5a524') {
+export function drawOverlay(ctx, frame, w, h, accent = '#f5a524', ground = null) {
   ctx.clearRect(0, 0, w, h);
   if (!frame || !frame.pose) return;
+  if (ground && ground.floor !== null && ground.floor !== undefined) drawFloor(ctx, frame, w, h, ground);
   const I = frame.pose.i, V = frame.pose.v;
   const at = (k) => [I[k * 2] * w, I[k * 2 + 1] * h];
 
@@ -231,4 +238,35 @@ export function drawOverlay(ctx, frame, w, h, accent = '#f5a524') {
       ctx.stroke();
     }
   }
+}
+
+/* The virtual floor under the feet: solid while they are on it, and while
+ * the person is in the air a dashed line with the gap marked. */
+function drawFloor(ctx, frame, w, h, ground) {
+  const I = frame.pose.i;
+  const xs = [27, 28, 29, 30, 31, 32].map((k) => I[k * 2] * w);
+  const feetY = Math.max(...[29, 30, 31, 32].map((k) => I[k * 2 + 1] * h));
+  const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const half = Math.max(w * 0.09, (Math.max(...xs) - Math.min(...xs)) * 0.9);
+  const y = ground.floor * h;
+  ctx.save();
+  ctx.lineWidth = Math.max(2, w / 300);
+  ctx.strokeStyle = '#3fd0c9';
+  ctx.fillStyle = 'rgba(63,208,201,0.16)';
+  ctx.beginPath();
+  ctx.ellipse(mid, y, half, half * 0.16, 0, 0, Math.PI * 2);
+  ctx.fill();
+  if (ground.air) ctx.setLineDash([8, 6]);
+  ctx.stroke();
+  if (ground.air) {
+    ctx.beginPath();
+    ctx.moveTo(mid, y);
+    ctx.lineTo(mid, feetY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = `600 ${Math.max(12, Math.round(w / 45))}px ui-sans-serif, -apple-system, system-ui`;
+    ctx.fillStyle = '#3fd0c9';
+    ctx.fillText('in the air', mid + 8, (y + feetY) / 2);
+  }
+  ctx.restore();
 }
